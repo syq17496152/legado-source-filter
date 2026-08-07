@@ -1,6 +1,11 @@
+pub mod cli;
+pub mod config;
 pub mod db;
+pub mod fetcher;
 pub mod http_client;
 pub mod js_polyfill;
+pub mod paths;
+pub mod pipeline;
 pub mod preflight;
 pub mod reporter;
 pub mod rule_dsl;

@@ -24,6 +24,9 @@ cargo run -- full --rounds 5
 
 # 快速测试前 10 个源
 cargo run -- full --limit 10 --rounds 3
+
+# 强制从头重测（清除缓存；默认会断点续测，已测源自动跳过）
+cargo run -- full --force --rounds 5
 ```
 
 ### `status` — 查看进度
@@ -42,8 +45,9 @@ cargo run -- status
 | `-t`, `--timeout N` | full | 单请求超时（秒），默认 15 |
 | `--rounds N` | full | 测试轮数，失败源每轮重试，默认 1 |
 | `--limit N` | full | 只测前 N 个源 |
-| `--force` | full | 忽略缓存，全部重新测试 |
+| `--force` | full | 清除缓存，全部从头重新测试；默认保留缓存断点续测 |
 | `--config PATH` | full | 指定 config.toml 路径（可选） |
+| `--verify-content` | full | 额外验证首个搜索结果的书籍页可读（ruleContent），通过才判 passed |
 | `--json` | 全局 | 输出 JSON Lines 到 stdout，适合 AI 解析 |
 | `-o`, `--output DIR` | 全局 | 输出目录（默认 XDG_CACHE_HOME） |
 

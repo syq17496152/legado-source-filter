@@ -47,6 +47,22 @@ pub fn extract_results(
     results
 }
 
+/// Apply a single rule string (e.g. `ruleContent.content`) against content.
+/// Used for one-shot extractions that don't need a full SearchRule.
+pub fn extract_single(content: &str, content_type: &str, rule: &str) -> Vec<String> {
+    let tokens = parser::tokenize(rule);
+    let extracted = if content_type.contains("json") {
+        if let Ok(json) = serde_json::from_str(content) {
+            json_extractor::extract(&json, &tokens)
+        } else {
+            Vec::new()
+        }
+    } else {
+        html_extractor::extract(content, &tokens)
+    };
+    combinator::apply_combinators(extracted, &tokens)
+}
+
 /// Check if search results contain valid data (non-empty name or author).
 pub fn has_valid_results(results: &[Vec<String>]) -> bool {
     if results.is_empty() {

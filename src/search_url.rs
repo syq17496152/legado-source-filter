@@ -13,14 +13,23 @@ pub struct RequestSpec {
 }
 
 /// Build an HTTP request spec from a book source and keyword.
-/// Returns None if the search URL type is not supported by this phase.
+///
+/// Returns `None` when the search URL is a JS pattern (`@js:` beyond L1, or
+/// `<js>` blocks) that cannot be resolved on the Rust side — the caller is
+/// then expected to fall back to the JS polyfill.
 pub fn build_request(source: &BookSource, keyword: &str) -> Option<RequestSpec> {
     let search_url = source.searchUrl.as_deref()?;
     let base_url = &source.bookSourceUrl;
 
-    // Determine the effective search URL (resolve @js: L1 patterns in Rust)
-    let effective_url = resolve_js_l1(search_url, base_url, keyword)
-        .unwrap_or_else(|| resolve_template(search_url, keyword));
+    // Determine the effective search URL. `@js:` L1 patterns are resolved in
+    // Rust; anything else JS-related must go through the JS polyfill.
+    let effective_url = if search_url.starts_with("@js:") {
+        resolve_js_l1(search_url, base_url, keyword)?
+    } else if search_url.contains("<js>") {
+        return None;
+    } else {
+        resolve_template(search_url, keyword)
+    };
 
     // Check for POST format: path,{'method':'POST','body':'...'}
     if let Some(spec) = try_parse_post(&effective_url, base_url) {
@@ -68,7 +77,7 @@ fn resolve_template(s: &str, keyword: &str) -> String {
 }
 
 /// Resolve a possibly-relative URL against a base URL.
-fn resolve_url(url: &str, base: &str) -> String {
+pub fn resolve_url(url: &str, base: &str) -> String {
     if url.starts_with("http://") || url.starts_with("https://") {
         return url.to_string();
     }

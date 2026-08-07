@@ -15,6 +15,7 @@ pub fn write_outputs(
     // ── eligible → DB ──
     let eligible_json = serde_json::to_string(&output.eligible)?;
     cache.save_meta("eligible", &eligible_json)?;
+    cache.save_meta("eligible_count", &output.eligible.len().to_string())?;
 
     // ── explore_only.json ──
     if !output.explore_only.is_empty() {

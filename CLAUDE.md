@@ -26,16 +26,20 @@ cargo run -- --json full --limit 5       # 一键运行+JSON 输出（AI 友好�
 全量测试（2957 源 × 5 轮）约需 5-15 分钟，第 1 轮为主，后 4 轮只重试极少量 network_error 源。SQLite 缓存支持断点续测：
 
 ```bash
-# 首次启动（自动清除旧缓存，从头跑）
+# 首次启动（无缓存时自动从头跑；已有缓存则直接续测）
 cargo run -- full --rounds 5
 
 # 如果超时或中断：查进度，然后续跑
 cargo run -- --json status              # 看已完成/剩余多少
 cargo run -- full --rounds 5            # 续跑——已有缓存的源直接跳过
+
+# 强制从头重测（清除 test_cache.db 和 filtered.json）
+cargo run -- full --force --rounds 5
 ```
 
 关键原则：
-- `full` 命令**默认清除旧缓存**，确保从头重新测试。续跑直接重新执行 `full` 命令即可，已有缓存的源自动跳过
+- `full` 命令**默认保留缓存续测**：已 `passed` / `dead_domain` / `js_api` 的源直接跳过，只重测未测项和 `failed` 源
+- 仅当书源 JSON 更新或显式加 `--force` 时才会清除缓存、从头重测
 - SQLite 缓存（`output/test_cache.db`）保存每源最终状态，重复执行只测未完成项
 - `--rounds N` 的后几轮只重试 `network_error` 源，不重试 `passed` / `dead_domain` / `no_results`
 - 用 `--json` flag 输出结构化结果，方便 AI 解析进度和状态
@@ -44,16 +48,21 @@ cargo run -- full --rounds 5            # 续跑——已有缓存的源直接�
 
 ```
 src/
-├── main.rs          — CLI 入口（clap，full / status 子命令）
+├── main.rs          — 入口：解析 CLI、分发 status/full（薄层）
 ├── lib.rs           — 库导出，供集成测试使用
+├── cli.rs           — clap 参数定义 + --json 事件输出
+├── paths.rs         — 输入/输出路径解析（CWD 优先，XDG 兜底）
+├── config.rs        — config.toml 加载 + TestConfig 构造
+├── fetcher.rs       — 书源下载（aoaostar 索引发现 + 原子替换）
+├── pipeline.rs      — 多轮测试编排、dead_domain 标记、汇总、输出
 ├── types.rs         — BookSource、规则结构体、枚举
 ├── preflight.rs     — 5 步预检分类管道
 ├── url_fixer.rs     — 自动修复残缺 bookSourceUrl
 ├── search_url.rs    — 从 searchUrl 构造 HTTP 请求（{{key}}、POST、JS L1）
 ├── http_client.rs   — reqwest 封装（chardetng 编码探测 + encoding_rs 转码）
-├── tester.rs        — 异步测试调度（tokio JoinSet + Semaphore）
+├── tester.rs        — 异步测试调度（tokio Semaphore + 抖动重试）
 ├── reporter.rs      — JSON 报告输出
-├── db.rs            — SQLite 缓存层（断点续测）
+├── db.rs            — SQLite 缓存层（单连接 Mutex + WAL，断点续测）
 ├── rule_dsl/        — Legado 自定义规则 DSL 解析器
 │   ├── parser.rs         — 词法分析器
 │   ├── html_extractor.rs — HTML 规则求值（scraper）
@@ -61,7 +70,7 @@ src/
 │   └── combinator.rs     — || 回退、## 正则替换、!0 索引
 └── js_polyfill/     — JS searchUrl 处理引擎
     ├── polyfill.js       — 模拟 java.ajax/post/put/get/cookie/source
-    └── runner.rs         — node --eval 子进程管理
+    └── runner.rs         — node 批量求值（每源一次 node 进程跑完全部关键词）
 ```
 
 ## 关键数据
@@ -82,6 +91,7 @@ src/
 | `--limit N` | 只测前 N 个源 |
 | `--rounds N` | 测试轮数，失败源每轮重试（默认 1） |
 | `--concurrency N` | 并发数，默认 50 |
+| `--verify-content` | 额外验证首个搜索结果的书页可读（ruleContent），通过才判 passed |
 
 ## Legado DSL
 
