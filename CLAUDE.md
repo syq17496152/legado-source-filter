@@ -79,8 +79,12 @@ cargo run -- full --force --rounds 5
 
 1. ~~**JS 正文需要二次 HTTP**~~ ✅ 已实现（java.ajax/java.post 交互桥）。仍无法覆盖的变体：
    依赖 `java.getCookie`/验证码/`setVariable` 跨请求状态的源（如来看文学），桥只能做单次请求。
-2. **强加密正文** — `aesBase64DecodeToString` / DESede / RSA 等解密（约 42 源）。node 原生 crypto
-   已覆盖部分 AES/Base64/MD5，但 DESede、自定义 key 派生、RSA 未覆盖。
+2. **强加密正文** — 大部分已实现：
+   `aesBase64DecodeToString` 支持 AES/DESede；`SecretKeySpec`/`IvParameterSpec`/
+   `Base64.decode`/`Cipher`/`Arrays.copyOfRange` Java 类 polyfill 覆盖
+   `Cipher.getInstance(...)` 风格的 DESede/AES 解密（含七猫 iv 内嵌模式）。
+   仍无法覆盖：RSA/SHA256WithRSA（约 20 源，需 PKCS8 密钥解析）、
+   DES-CBC（Node OpenSSL 3 禁用）、自定义 key 派生。
 3. ~~**正文分页**~~ ✅ 已实现 — `nextContentUrl` 翻页正文已支持：`verify_chain` 提取
    当前页正文后按 `nextContentUrl` 循环翻页累计（上限 30 页、自引用防死循环）；
    提取不到下一页时回退为单页判定，不影响普通章节。数据中约 865 源声明了该规则。
