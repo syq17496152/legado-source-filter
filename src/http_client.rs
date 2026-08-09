@@ -79,6 +79,19 @@ impl HttpClient {
                     // Replace templates in body too
                     req = req.body(body.clone());
                 }
+                // Form-style POST bodies (Legado `'body':'a=b&c=d'`) need the
+                // urlencoded Content-Type, otherwise some sites return an
+                // error page instead of search results.
+                let has_ct = spec
+                    .headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("content-type"));
+                if !has_ct {
+                    req = req.header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    );
+                }
                 for (k, v) in &spec.headers {
                     req = req.header(k, v);
                 }
