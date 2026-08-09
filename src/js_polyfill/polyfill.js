@@ -625,6 +625,17 @@ globalThis.Packages = {
         },
         text: { SimpleDateFormat: function() { return { format: (d) => String(d) }; } },
         net: { URLEncoder: { encode: (s) => encodeURIComponent(s) } }
+    },
+    // Namespaces used only as importPackage() targets; the classes themselves
+    // are exposed by the JavaImporter polyfill.
+    javax: {
+        crypto: {
+            spec: {},
+            Cipher: {}
+        }
+    },
+    android: {
+        util: { Base64: {} }
     }
 };
 
@@ -632,7 +643,25 @@ globalThis.Packages = {
 globalThis.org = globalThis.Packages.org;
 globalThis.jsoup = globalThis.Packages.org.jsoup;
 
-globalThis.JavaImporter = function() { return function() {}; };
+// `with(javaImport)` exposes crypto classes to rules that use JavaImporter.
+globalThis.JavaImporter = function() {
+    const imp = {};
+    imp.importPackage = function() {
+        // JavaImporter.importPackage brings java.* / javax.* classes into scope.
+        // We expose the classes we polyfill so `with(javaImport){ SecretKeySpec... }`
+        // rules resolve them.
+        imp.SecretKeySpec = globalThis.SecretKeySpec;
+        imp.IvParameterSpec = globalThis.IvParameterSpec;
+        imp.Base64 = globalThis.Base64;
+        imp.Cipher = globalThis.Cipher;
+        imp.Arrays = globalThis.Arrays;
+        imp.String = globalThis.String;
+        imp.Base64 = globalThis.Base64;
+        return imp;
+    };
+    imp.importClass = imp.importPackage;
+    return imp;
+};
 
 // ── Java crypto classes (SecretKeySpec / IvParameterSpec / Base64 / Cipher) ──
 // Sources that decrypt paginated content use the classic Java API:
