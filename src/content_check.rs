@@ -249,12 +249,13 @@ pub async fn verify_chain(
 
     // ── 5. Chapter page ──
     let chapter_headers = page_headers(&src_headers, &toc_url);
-    let Some((chapter_body, chapter_ct)) = fetch_body(client, &chapter_url, &chapter_headers).await
+    let Some((mut chapter_body, mut chapter_ct)) =
+        fetch_body(client, &chapter_url, &chapter_headers).await
     else {
         return ChainResult::fail("chapter_fetch", &chapter_url);
     };
 
-    // ── 6. ruleContent.content → text ──
+    // ── 6. ruleContent.content → text, walking nextContentUrl pages ──
     let Some(content_rule) = source
         .ruleContent
         .as_ref()
@@ -265,23 +266,72 @@ pub async fn verify_chain(
         return ChainResult::fail("no_content_rule", source.bookSourceName.as_str());
     };
 
-    let raw = eval_rule(
-        client,
-        &chapter_body,
-        &chapter_ct,
-        content_rule,
-        &chapter_url,
-        &chapter_headers,
-    )
-    .await
-    .unwrap_or_default();
+    let next_rule = source
+        .ruleContent
+        .as_ref()
+        .and_then(|c| c.nextContentUrl.as_deref())
+        .map(str::trim)
+        .filter(|r| !r.is_empty() && *r != "-" && *r != "#");
 
-    let text = clean_text(&raw);
-    let len = text.chars().count();
+    // Walk pages: extract the current page's text, then follow nextContentUrl
+    // until it yields nothing (single-page chapter → fall back to what we have)
+    // or we hit a safety cap (broken rules / infinite loops).
+    const MAX_PAGES: usize = 30;
+    let mut accumulated = String::new();
+    let mut pages = 0;
+    let mut current_url = chapter_url.to_string();
+    let current_headers = &chapter_headers;
+
+    loop {
+        pages += 1;
+        let raw = eval_rule(
+            client,
+            &chapter_body,
+            &chapter_ct,
+            content_rule,
+            &current_url,
+            current_headers,
+        )
+        .await
+        .unwrap_or_default();
+        if !raw.is_empty() {
+            accumulated.push_str(&clean_text(&raw));
+        }
+
+        // Stop when there is no pagination rule or no next page to follow.
+        let Some(nr) = next_rule else { break };
+        if pages >= MAX_PAGES {
+            break;
+        }
+        let Some(next) = eval_rule(
+            client,
+            &chapter_body,
+            &chapter_ct,
+            nr,
+            &current_url,
+            current_headers,
+        )
+        .await
+        else {
+            break;
+        };
+        let next = resolve_url(&next, &current_url);
+        if next == current_url {
+            break; // same page again — guard against self-referencing rules
+        }
+        let Some((body, ct)) = fetch_body(client, &next, current_headers).await else {
+            break;
+        };
+        chapter_body = body;
+        chapter_ct = ct;
+        current_url = next;
+    }
+
+    let len = accumulated.chars().count();
     if len < 50 {
         return ChainResult::fail("content_short", format!("{} chars", len));
     }
-    ChainResult::pass(len, text.chars().take(40).collect::<String>())
+    ChainResult::pass(len, accumulated.chars().take(40).collect::<String>())
 }
 
 /// Strip tags & whitespace for length heuristics, collapse the whole thing.
@@ -522,5 +572,180 @@ mod tests {
         assert!(out.contains(&"x".to_string()));
         assert!(out.contains(&"y".to_string()));
         assert!(out.contains(&"data.list[0]".to_string()));
+    }
+
+    // ── nextContentUrl pagination ──
+
+    /// Spin up a mock HTTP server that serves a paginated chapter:
+    ///   /book           → book detail page
+    ///   /toc            → TOC page whose first chapter is /c/1
+    ///   /c/1, /c/2, ... → chapter pages; page i carries a next link to /c/{i+1}
+    /// `pages` pages total, each with `text_per_page` chars of body.
+    async fn mock_paginated_server(pages: usize) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/");
+                    let body = match path {
+                        "/book" => "<html><body>书名</body></html>".to_string(),
+                        "/toc" => {
+                            "<html><a href='/c/1'>第一章</a><a href='/c/2'>第二章</a></html>"
+                                .to_string()
+                        }
+                        p if p.starts_with("/c/") => {
+                            let page: usize = p[3..].parse().unwrap_or(1);
+                            let next = if page < pages {
+                                format!(
+                                    "<html><div id='next' href='/c/{}'>下一页</div><p>{}</p></html>",
+                                    page + 1,
+                                    "正".repeat(200)
+                                )
+                            } else {
+                                format!(
+                                    "<html><div id='next'></div><p>{}</p></html>",
+                                    "正".repeat(200)
+                                )
+                            };
+                            next
+                        }
+                        _ => "not found".to_string(),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// Build a source whose ruleContent has the given nextContentUrl rule.
+    fn paginated_source(
+        base: &str,
+        next_content_rule: Option<&str>,
+    ) -> (BookSource, String) {
+        let source = BookSource {
+            bookSourceName: "翻页测试".into(),
+            bookSourceUrl: base.to_string(),
+            ruleBookInfo: None,
+            ruleToc: Some(TocRule {
+                chapterList: Some("a".into()),
+                chapterUrl: Some("@href".into()),
+                chapterName: Some("@text".into()),
+                ..Default::default()
+            }),
+            ruleContent: Some(ContentRule {
+                content: Some("div#next,p@text".into()),
+                nextContentUrl: next_content_rule.map(|r| r.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let toc_url = format!("{}/toc", base);
+        (source, toc_url)
+    }
+
+    #[tokio::test]
+    async fn test_pagination_walks_all_pages() {
+        let addr = mock_paginated_server(3).await;
+        let base = format!("http://{}", addr);
+        let (source, toc_url) = paginated_source(&base, Some("div#next@href"));
+        let client = HttpClient::new(10).unwrap();
+        // Verify chain from the TOC page: chain uses ruleBookInfo.tocUrl default
+        // to book_url, so pass the TOC URL as book_url.
+        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        assert!(res.ok, "expected pass, got {:?}", res);
+        assert!(res.content_len >= 3 * 200, "expected ~600 chars, got {}", res.content_len);
+    }
+
+    #[tokio::test]
+    async fn test_pagination_single_page_falls_back() {
+        // Chapter has only one page (server `pages=1`), so the nextContentUrl
+        // rule yields nothing. Must still pass using the single page's content.
+        let addr = mock_paginated_server(1).await;
+        let base = format!("http://{}", addr);
+        let (source, toc_url) = paginated_source(&base, Some("div#next@href"));
+        let client = HttpClient::new(10).unwrap();
+        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        assert!(res.ok, "single-page chapter should pass, got {:?}", res);
+        assert!(res.content_len >= 200, "got {}", res.content_len);
+    }
+
+    #[tokio::test]
+    async fn test_pagination_missing_rule_ok() {
+        // No nextContentUrl at all — plain single fetch, still passes.
+        let addr = mock_paginated_server(1).await;
+        let base = format!("http://{}", addr);
+        let (source, toc_url) = paginated_source(&base, None);
+        let client = HttpClient::new(10).unwrap();
+        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        assert!(res.ok, "no nextContentUrl should not fail, got {:?}", res);
+    }
+
+    #[tokio::test]
+    async fn test_pagination_self_referencing_guarded() {
+        // nextContentUrl returns the same page → must stop, not infinite loop.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/");
+                    let body = match path {
+                        "/book" => "<html><body>书名</body></html>".to_string(),
+                        "/toc" => "<html><a href='/c/1'>第一章</a></html>".to_string(),
+                        "/c/1" => {
+                            // next link points at the SAME page
+                            "<html><div id='next' href='/c/1'>下一页</div><p>正文</p></html>"
+                                .to_string()
+                        }
+                        _ => "nf".to_string(),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        let base = format!("http://{}", addr);
+        let (source, toc_url) = paginated_source(&base, Some("div#next@href"));
+        let client = HttpClient::new(10).unwrap();
+        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        // 2 chars of "正文" is below threshold, but crucially it must terminate.
+        assert!(!res.ok, "self-referencing next should be content_short, got {:?}", res);
     }
 }

@@ -164,6 +164,12 @@ pub struct ContentRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 
+    /// Rule extracting the URL of the next page of a paginated chapter.
+    /// When a chapter spans multiple pages, `content` yields only the current
+    /// page; walking `nextContentUrl` lets us assemble the full chapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nextContentUrl: Option<String>,
+
     #[serde(flatten)]
     pub extra: Extra,
 }

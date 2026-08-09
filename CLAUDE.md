@@ -81,7 +81,9 @@ cargo run -- full --force --rounds 5
    依赖 `java.getCookie`/验证码/`setVariable` 跨请求状态的源（如来看文学），桥只能做单次请求。
 2. **强加密正文** — `aesBase64DecodeToString` / DESede / RSA 等解密（约 42 源）。node 原生 crypto
    已覆盖部分 AES/Base64/MD5，但 DESede、自定义 key 派生、RSA 未覆盖。
-3. **正文分页** — `nextContentUrl` 翻页正文未实现（当前 filtered 中无此源，影响小）。
+3. ~~**正文分页**~~ ✅ 已实现 — `nextContentUrl` 翻页正文已支持：`verify_chain` 提取
+   当前页正文后按 `nextContentUrl` 循环翻页累计（上限 30 页、自引用防死循环）；
+   提取不到下一页时回退为单页判定，不影响普通章节。数据中约 865 源声明了该规则。
 4. **正文依赖登录/cookie** — `enabledCookieJar` 源（1690 个）需先访问站点种 cookie，
    当前 HttpClient 未开 cookie_store，命中会判 `blocked` 或 `no_results`。
 5. **图片型正文（漫画）** — ruleContent 提取纯图片无文字，`content_short` 阈值会误杀；
