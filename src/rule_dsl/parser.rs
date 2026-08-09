@@ -41,7 +41,10 @@ pub enum RuleToken {
     /// `||` — fallback separator
     Fallback,
     /// `##pattern##replacement`
-    RegexReplace { pattern: String, replacement: String },
+    RegexReplace {
+        pattern: String,
+        replacement: String,
+    },
 
     // ── Special ──
     /// Bare element name like `@a`, `@li` — shorthand tag selector
@@ -192,10 +195,13 @@ fn split_index(s: &str) -> (&str, Option<usize>) {
         digit_end -= 1;
     }
 
-    if digit_end > 0 && digit_end < len && (bytes[digit_end - 1] == b'.' || bytes[digit_end - 1] == b'!')
-        && let Ok(num) = s[digit_end..].parse::<usize>() {
-            return (&s[..digit_end - 1], Some(num));
-        }
+    if digit_end > 0
+        && digit_end < len
+        && (bytes[digit_end - 1] == b'.' || bytes[digit_end - 1] == b'!')
+        && let Ok(num) = s[digit_end..].parse::<usize>()
+    {
+        return (&s[..digit_end - 1], Some(num));
+    }
     (s, None)
 }
 
@@ -263,11 +269,14 @@ mod tests {
     #[test]
     fn test_simple_css() {
         let t = tokenize("class.item@tag.li@text");
-        assert_eq!(t, vec![
-            RuleToken::CssClass("item".into()),
-            RuleToken::TagName("li".into()),
-            RuleToken::Text,
-        ]);
+        assert_eq!(
+            t,
+            vec![
+                RuleToken::CssClass("item".into()),
+                RuleToken::TagName("li".into()),
+                RuleToken::Text,
+            ]
+        );
     }
 
     #[test]

@@ -38,9 +38,18 @@ fn test_preflight_pipeline() {
 fn test_url_fixer_cases() {
     use legado_source_filter::url_fixer::fix_url;
 
-    assert_eq!(fix_url("https://example.com"), Some("https://example.com".into()));
-    assert_eq!(fix_url("www.example.com"), Some("https://www.example.com".into()));
-    assert_eq!(fix_url("m.xxbiqudu.com"), Some("https://m.xxbiqudu.com".into()));
+    assert_eq!(
+        fix_url("https://example.com"),
+        Some("https://example.com".into())
+    );
+    assert_eq!(
+        fix_url("www.example.com"),
+        Some("https://www.example.com".into())
+    );
+    assert_eq!(
+        fix_url("m.xxbiqudu.com"),
+        Some("https://m.xxbiqudu.com".into())
+    );
     assert_eq!(
         fix_url("[图片]http://www.sfacg.com"),
         Some("http://www.sfacg.com".into())
@@ -65,7 +74,10 @@ fn test_rule_dsl_parser() {
 
     let t = tokenize("class.a@text||class.b@text");
     assert!(t.iter().any(|tok| {
-        matches!(tok, legado_source_filter::rule_dsl::parser::RuleToken::Fallback)
+        matches!(
+            tok,
+            legado_source_filter::rule_dsl::parser::RuleToken::Fallback
+        )
     }));
 }
 

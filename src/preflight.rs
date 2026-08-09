@@ -71,11 +71,14 @@ pub fn run(sources: Vec<BookSource>) -> PreflightOutput {
 
         // Step 3: has searchUrl but missing ruleSearch (should be ~0)
         if let Some(ref su) = source.searchUrl
-            && !su.trim().is_empty() && su.trim() != "-" && su.trim() != "#"
-                && source.ruleSearch.is_none() {
-                    skipped.push((source, SkipReason::NoSearchRule));
-                    continue;
-                }
+            && !su.trim().is_empty()
+            && su.trim() != "-"
+            && su.trim() != "#"
+            && source.ruleSearch.is_none()
+        {
+            skipped.push((source, SkipReason::NoSearchRule));
+            continue;
+        }
 
         // Step 4: check ruleContent
         if source.ruleContent.is_none() {

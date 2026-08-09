@@ -97,9 +97,7 @@ mod tests {
     fn test_apply_combinators_index_removal() {
         // !0 means "exclude index 0" — remove first element
         use crate::rule_dsl::parser::RuleToken;
-        let tokens = vec![
-            RuleToken::Index(0),
-        ];
+        let tokens = vec![RuleToken::Index(0)];
         let values = vec!["remove".to_string(), "keep".to_string()];
         let result = apply_combinators(values, &tokens);
         assert_eq!(result, vec!["keep"]);

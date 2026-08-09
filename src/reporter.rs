@@ -31,7 +31,10 @@ pub fn write_outputs(
         let key = serde_json::to_string(reason).unwrap_or_default();
         *skip_counts.entry(key).or_insert(0) += 1;
     }
-    let skip_detail: serde_json::Value = skip_counts.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+    let skip_detail: serde_json::Value = skip_counts
+        .iter()
+        .map(|(k, v)| (k.to_string(), *v))
+        .collect();
 
     let report_json = serde_json::json!({
         "summary": {

@@ -47,10 +47,14 @@ pub enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
 
-        /// Also verify ruleContent extracts readable content from the first
-        /// search result's book page before marking a source as passed
-        #[arg(long)]
+        /// Verify the full reading chain (book info → TOC → chapter content)
+        /// before marking a source passed. Default: on.
+        #[arg(long, default_value = "true", action = clap::ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true")]
         verify_content: bool,
+
+        /// Skip the reading-chain content verification (search-only mode).
+        #[arg(long)]
+        no_verify_content: bool,
     },
 }
 

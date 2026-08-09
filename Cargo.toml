@@ -5,7 +5,7 @@ edition = "2024"
 description = "Filter Legado book sources to find usable ones"
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "io-util", "process", "macros"] }
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "gzip"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

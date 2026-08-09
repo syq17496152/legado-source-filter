@@ -5,8 +5,22 @@ use reqwest::{Client, ClientBuilder};
 
 use crate::search_url::RequestSpec;
 
+/// Classify an HTTP status code for failure-reason reporting.
+/// Returns a short label used in the cache `reason` column.
+pub fn classify_status(status: u16) -> &'static str {
+    match status {
+        200..=299 => "ok",
+        401 | 403 => "blocked", // anti-bot / auth wall
+        404 => "not_found",
+        408 | 429 => "rate_limited",
+        500..=599 => "server_error",
+        _ => "http_error",
+    }
+}
+
 pub struct HttpClient {
     client: Client,
+    no_redirect_client: Client,
 }
 
 #[derive(Debug)]
@@ -18,6 +32,7 @@ pub struct FetchResult {
     pub elapsed_ms: u64,
     pub charset_detected: Option<String>,
     pub charset_uncertain: bool,
+    pub headers: Vec<(String, String)>,
 }
 
 impl HttpClient {
@@ -31,15 +46,35 @@ impl HttpClient {
             .https_only(false)
             .build()?;
 
-        Ok(Self { client })
+        // java.ajax/java.post bridge requests must NOT follow redirects so the
+        // JS can read `Location` from the response headers itself.
+        let no_redirect_client = ClientBuilder::new()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(timeout_secs))
+            .connect_timeout(Duration::from_secs(10))
+            .user_agent("Mozilla/5.0 (Linux; Android 13; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
+            .gzip(true)
+            .https_only(false)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        Ok(Self {
+            client,
+            no_redirect_client,
+        })
     }
 
     pub async fn fetch(&self, spec: &RequestSpec) -> anyhow::Result<FetchResult> {
         let start = std::time::Instant::now();
+        let client = if spec.no_redirect {
+            &self.no_redirect_client
+        } else {
+            &self.client
+        };
 
         let response = match spec.method.as_str() {
             "POST" => {
-                let mut req = self.client.post(&spec.url);
+                let mut req = client.post(&spec.url);
                 if let Some(ref body) = spec.body {
                     // Replace templates in body too
                     req = req.body(body.clone());
@@ -50,7 +85,7 @@ impl HttpClient {
                 req.send().await?
             }
             _ => {
-                let mut req = self.client.get(&spec.url);
+                let mut req = client.get(&spec.url);
                 for (k, v) in &spec.headers {
                     req = req.header(k, v);
                 }
@@ -72,11 +107,18 @@ impl HttpClient {
             .unwrap_or("")
             .to_string();
 
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let body_bytes = response.bytes().await?.to_vec();
 
         // Decode bytes to string using charset detection
-        let (body_text, charset_detected, charset_uncertain) = decode_body(&body_bytes, &content_type, &spec.charset);
+        let (body_text, charset_detected, charset_uncertain) =
+            decode_body(&body_bytes, &content_type, &spec.charset);
 
         Ok(FetchResult {
             body_text,
@@ -86,6 +128,7 @@ impl HttpClient {
             elapsed_ms,
             charset_detected,
             charset_uncertain,
+            headers,
         })
     }
 }
@@ -107,22 +150,28 @@ pub fn parse_headers(header_str: &str) -> Vec<(String, String)> {
     headers
 }
 
-fn decode_body(bytes: &[u8], content_type: &str, url_charset: &Option<String>) -> (String, Option<String>, bool) {
+fn decode_body(
+    bytes: &[u8],
+    content_type: &str,
+    url_charset: &Option<String>,
+) -> (String, Option<String>, bool) {
     // Priority 1: Content-Type header charset
     if let Some(charset_str) = extract_charset_from_header(content_type)
-        && let Some(encoding) = Encoding::for_label(charset_str.as_bytes()) {
-            let (text, _, _) = encoding.decode(bytes);
-            return (text.into_owned(), Some(charset_str), false);
-        }
+        && let Some(encoding) = Encoding::for_label(charset_str.as_bytes())
+    {
+        let (text, _, _) = encoding.decode(bytes);
+        return (text.into_owned(), Some(charset_str), false);
+    }
 
     // Priority 2: Charset hint from searchUrl config
     if let Some(charset) = url_charset
-        && let Some(encoding) = Encoding::for_label(charset.as_bytes()) {
-            let (text, _, had_errors) = encoding.decode(bytes);
-            if !had_errors {
-                return (text.into_owned(), Some(charset.clone()), false);
-            }
+        && let Some(encoding) = Encoding::for_label(charset.as_bytes())
+    {
+        let (text, _, had_errors) = encoding.decode(bytes);
+        if !had_errors {
+            return (text.into_owned(), Some(charset.clone()), false);
         }
+    }
 
     // Priority 3: chardetng detection
     let mut detector = chardetng::EncodingDetector::new();
@@ -154,7 +203,10 @@ mod tests {
     #[test]
     fn test_parse_headers_simple() {
         let h = parse_headers("{'User-Agent': 'Mozilla/5.0'}");
-        assert_eq!(h, vec![("User-Agent".to_string(), "Mozilla/5.0".to_string())]);
+        assert_eq!(
+            h,
+            vec![("User-Agent".to_string(), "Mozilla/5.0".to_string())]
+        );
     }
 
     #[test]
@@ -171,9 +223,6 @@ mod tests {
             extract_charset_from_header("text/html; charset=gbk"),
             Some("gbk".into())
         );
-        assert_eq!(
-            extract_charset_from_header("text/html"),
-            None
-        );
+        assert_eq!(extract_charset_from_header("text/html"), None);
     }
 }

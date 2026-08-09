@@ -32,11 +32,19 @@ pub fn build_test_config(
     let mut test_books = Vec::new();
     if let Some(searches) = config_toml.get("search").and_then(|v| v.as_array()) {
         for entry in searches {
-            let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if !name.is_empty() {
                 test_books.push(tester::TestBook {
                     name,
-                    author: entry.get("author").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    author: entry
+                        .get("author")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     domain_hint: None,
                 });
             }

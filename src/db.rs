@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 
 /// Thread-safe wrapper around a single SQLite connection.
 ///
@@ -31,7 +31,7 @@ impl TestCache {
             CREATE TABLE IF NOT EXISTS pipeline_data (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"
+            );",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -56,9 +56,7 @@ impl TestCache {
     /// Returns per-status counts from the test cache.
     pub fn summary(&self) -> SqlResult<Vec<(String, usize)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT status, COUNT(*) FROM test_results GROUP BY status"
-        )?;
+        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM test_results GROUP BY status")?;
         let rows = stmt.query_map([], |row| {
             let status: String = row.get(0)?;
             let count: usize = row.get(1)?;
@@ -84,9 +82,7 @@ impl TestCache {
     /// Load a metadata entry by key.
     pub fn load_meta(&self, key: &str) -> SqlResult<Option<String>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT value FROM pipeline_data WHERE key = ?1"
-        )?;
+        let mut stmt = conn.prepare("SELECT value FROM pipeline_data WHERE key = ?1")?;
         let mut rows = stmt.query(params![key])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
@@ -95,7 +91,14 @@ impl TestCache {
         }
     }
 
-    pub fn save(&self, url: &str, name: &str, status: &str, reason: Option<&str>, retry_count: u32) -> SqlResult<()> {
+    pub fn save(
+        &self,
+        url: &str,
+        name: &str,
+        status: &str,
+        reason: Option<&str>,
+        retry_count: u32,
+    ) -> SqlResult<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -133,8 +136,12 @@ mod tests {
         assert_eq!(cache.check("https://a.com", "A").unwrap(), None);
 
         cache.save("https://a.com", "A", "passed", None, 1).unwrap();
-        cache.save("https://b.com", "B", "failed", Some("network_error"), 1).unwrap();
-        cache.save("https://c.com", "C", "dead_domain", Some("no_results"), 0).unwrap();
+        cache
+            .save("https://b.com", "B", "failed", Some("network_error"), 1)
+            .unwrap();
+        cache
+            .save("https://c.com", "C", "dead_domain", Some("no_results"), 0)
+            .unwrap();
 
         let (status, reason) = cache.check("https://b.com", "B").unwrap().unwrap();
         assert_eq!(status, "failed");
@@ -165,7 +172,9 @@ mod tests {
         let path = temp_db("update.db");
         let cache = TestCache::new(&path).unwrap();
 
-        cache.save("https://a.com", "A", "failed", Some("no_results"), 1).unwrap();
+        cache
+            .save("https://a.com", "A", "failed", Some("no_results"), 1)
+            .unwrap();
         cache.save("https://a.com", "A", "passed", None, 1).unwrap();
 
         let (status, reason) = cache.check("https://a.com", "A").unwrap().unwrap();

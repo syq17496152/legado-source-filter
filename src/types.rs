@@ -276,7 +276,10 @@ mod tests {
         assert_eq!(rc["nextContentUrl"], serde_json::json!("@css:body@text"));
         assert_eq!(rc["replaceRegex"], serde_json::json!("##x||y"));
         assert_eq!(back["ruleSearch"]["futureSearch"], serde_json::json!("x"));
-        assert_eq!(back["ruleBookInfo"]["init"], serde_json::json!("@js:var a=1"));
+        assert_eq!(
+            back["ruleBookInfo"]["init"],
+            serde_json::json!("@js:var a=1")
+        );
         assert_eq!(back["ruleToc"]["isVolume"], serde_json::json!("true"));
     }
 }

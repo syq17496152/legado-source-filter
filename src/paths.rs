@@ -5,9 +5,11 @@ use std::path::PathBuf;
 pub fn resolve_input() -> PathBuf {
     let xdg = {
         let home = || std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let base = std::env::var("XDG_DATA_HOME")
-            .unwrap_or_else(|_| format!("{}/.local/share", home()));
-        PathBuf::from(base).join("legado-source-filter").join("sources.json")
+        let base =
+            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home()));
+        PathBuf::from(base)
+            .join("legado-source-filter")
+            .join("sources.json")
     };
     // Check for project-relative data files (convenience for running from repo root)
     if let Ok(cwd) = std::env::current_dir() {
@@ -46,7 +48,6 @@ pub fn resolve_output() -> PathBuf {
         }
     }
     let home = || std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let base = std::env::var("XDG_CACHE_HOME")
-        .unwrap_or_else(|_| format!("{}/.cache", home()));
+    let base = std::env::var("XDG_CACHE_HOME").unwrap_or_else(|_| format!("{}/.cache", home()));
     PathBuf::from(base).join("legado-source-filter")
 }

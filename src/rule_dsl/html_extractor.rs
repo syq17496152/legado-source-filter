@@ -51,13 +51,12 @@ pub fn extract(html: &str, tokens: &[RuleToken]) -> Vec<String> {
             RuleToken::TextNodes => {
                 for html_snippet in &current_html {
                     let doc = Html::parse_fragment(html_snippet);
-                    let text: String = doc.root_element()
+                    let text: String = doc
+                        .root_element()
                         .children()
-                        .filter_map(|child| {
-                            match child.value() {
-                                scraper::node::Node::Text(t) => Some(t.text.to_string()),
-                                _ => None,
-                            }
+                        .filter_map(|child| match child.value() {
+                            scraper::node::Node::Text(t) => Some(t.text.to_string()),
+                            _ => None,
                         })
                         .collect();
                     results.push(text);
@@ -67,10 +66,14 @@ pub fn extract(html: &str, tokens: &[RuleToken]) -> Vec<String> {
             RuleToken::Href => {
                 for html_snippet in &current_html {
                     let doc = Html::parse_fragment(html_snippet);
-                    if let Some(elem) = doc.root_element().select(&Selector::parse("*").unwrap()).next()
-                        && let Some(href) = elem.value().attr("href") {
-                            results.push(href.to_string());
-                        }
+                    if let Some(elem) = doc
+                        .root_element()
+                        .select(&Selector::parse("*").unwrap())
+                        .next()
+                        && let Some(href) = elem.value().attr("href")
+                    {
+                        results.push(href.to_string());
+                    }
                 }
                 return results;
             }
@@ -84,10 +87,14 @@ pub fn extract(html: &str, tokens: &[RuleToken]) -> Vec<String> {
             RuleToken::Src => {
                 for html_snippet in &current_html {
                     let doc = Html::parse_fragment(html_snippet);
-                    if let Some(elem) = doc.root_element().select(&Selector::parse("*").unwrap()).next()
-                        && let Some(src) = elem.value().attr("src") {
-                            results.push(src.to_string());
-                        }
+                    if let Some(elem) = doc
+                        .root_element()
+                        .select(&Selector::parse("*").unwrap())
+                        .next()
+                        && let Some(src) = elem.value().attr("src")
+                    {
+                        results.push(src.to_string());
+                    }
                 }
                 return results;
             }
@@ -120,7 +127,8 @@ fn apply_selector_all(snippets: &[String], selector_str: &str) -> Vec<String> {
             // that may depend on any attribute (data-*, style, title, rel, etc.).
             let inner = element.html();
             let tag = element.value().name.local.as_ref();
-            let attrs: String = element.value()
+            let attrs: String = element
+                .value()
                 .attrs()
                 .map(|(k, v)| format!(" {}=\"{}\"", k, v.replace('"', "&quot;")))
                 .collect::<Vec<_>>()

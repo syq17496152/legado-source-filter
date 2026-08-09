@@ -5,7 +5,12 @@ use reqwest::blocking::Client;
 /// Remove pipeline output cache files (test DB + derived artifacts).
 /// Must also remove WAL/SHM sidecar files for the SQLite DB.
 pub fn clear_output_cache(output_dir: &Path) {
-    for entry in &["test_cache.db", "test_cache.db-wal", "test_cache.db-shm", "filtered.json"] {
+    for entry in &[
+        "test_cache.db",
+        "test_cache.db-wal",
+        "test_cache.db-shm",
+        "filtered.json",
+    ] {
         let path = output_dir.join(entry);
         if path.exists() {
             let _ = std::fs::remove_file(&path);
@@ -22,9 +27,10 @@ pub fn ensure_fresh_source(input_path: &Path, output_dir: &Path) -> anyhow::Resu
 
     // Ensure data/ and output/ directories exist (for cargo install scenario)
     if let Some(parent) = input_path.parent()
-        && !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::create_dir_all(output_dir)?;
 
     // If we already have a local file, try remote update but don't fail if unreachable
@@ -47,17 +53,18 @@ pub fn ensure_fresh_source(input_path: &Path, output_dir: &Path) -> anyhow::Resu
     // Compare with the last downloaded URL
     let last_url = std::fs::read_to_string(&source_url_path).ok();
     if let Some(ref last) = last_url
-        && last.trim() == remote_url && has_local {
-            tracing::info!("书源已是最新: {}", remote_name);
-            return Ok(());
-        }
+        && last.trim() == remote_url
+        && has_local
+    {
+        tracing::info!("书源已是最新: {}", remote_name);
+        return Ok(());
+    }
 
     // Download new JSON to a temp file, then atomically replace
     tracing::info!("发现新书源: {}，正在下载...", remote_name);
     let temp_path = input_path.with_extension("tmp");
-    download_to_file(&remote_url, &temp_path).map_err(|e| {
-        anyhow::anyhow!("下载书源失败（服务器限速或网络问题，可稍后重试）: {}", e)
-    })?;
+    download_to_file(&remote_url, &temp_path)
+        .map_err(|e| anyhow::anyhow!("下载书源失败（服务器限速或网络问题，可稍后重试）: {}", e))?;
     std::fs::rename(&temp_path, input_path)?;
     std::fs::write(&source_url_path, &remote_url)?;
 
@@ -117,9 +124,10 @@ fn discover_source_url(html_str: &str) -> anyhow::Result<String> {
         // Within this <li>, find the first <a> with a .json href
         for a in li.select(&a_sel) {
             if let Some(href) = a.value().attr("href")
-                && href.ends_with(".json") {
-                    return Ok(href.to_string());
-                }
+                && href.ends_with(".json")
+            {
+                return Ok(href.to_string());
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 use clap::Parser;
-use legado_source_filter::cli::{json_event, Cli, Commands};
+use legado_source_filter::cli::{Cli, Commands, json_event};
 use legado_source_filter::config::build_test_config;
 use legado_source_filter::fetcher::{clear_output_cache, ensure_fresh_source};
 use legado_source_filter::paths::{resolve_input, resolve_output};
@@ -12,9 +12,11 @@ fn main() -> anyhow::Result<()> {
 
     if !cli.json {
         tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::from_default_env()
-                .add_directive("html5ever=off".parse().unwrap())
-                .add_directive(tracing::Level::ERROR.into()))
+            .with_env_filter(
+                EnvFilter::from_default_env()
+                    .add_directive("html5ever=off".parse().unwrap())
+                    .add_directive(tracing::Level::ERROR.into()),
+            )
             .init();
     }
 
@@ -26,11 +28,22 @@ fn main() -> anyhow::Result<()> {
             let db_path = output_path.join("test_cache.db");
 
             if let Ok(cache) = db::TestCache::new(&db_path) {
-                let n_total: usize = cache.load_meta("eligible_count").ok().flatten()
+                let n_total: usize = cache
+                    .load_meta("eligible_count")
+                    .ok()
+                    .flatten()
                     .and_then(|s| s.trim().parse().ok())
                     .or_else(|| {
-                        cache.load_meta("eligible").ok().flatten()
-                            .and_then(|s| serde_json::from_str::<Vec<legado_source_filter::types::BookSource>>(&s).ok())
+                        cache
+                            .load_meta("eligible")
+                            .ok()
+                            .flatten()
+                            .and_then(|s| {
+                                serde_json::from_str::<
+                                        Vec<legado_source_filter::types::BookSource>,
+                                    >(&s)
+                                    .ok()
+                            })
                             .map(|v| v.len())
                     })
                     .unwrap_or(0);
@@ -42,14 +55,17 @@ fn main() -> anyhow::Result<()> {
                     counts.insert(s.clone(), *c);
                 }
 
-                json_event(&cli, serde_json::json!({
-                    "event": "status",
-                    "preflight": if n_total > 0 { "done" } else { "not_run" },
-                    "total": n_total,
-                    "tested": tested,
-                    "remaining": n_total.saturating_sub(tested),
-                    "details": counts,
-                }));
+                json_event(
+                    &cli,
+                    serde_json::json!({
+                        "event": "status",
+                        "preflight": if n_total > 0 { "done" } else { "not_run" },
+                        "total": n_total,
+                        "tested": tested,
+                        "remaining": n_total.saturating_sub(tested),
+                        "details": counts,
+                    }),
+                );
 
                 if !cli.json {
                     println!("=== Pipeline Status ===");
@@ -59,19 +75,29 @@ fn main() -> anyhow::Result<()> {
                         println!("Preflight: not run yet — run `full` first");
                     }
                     if tested > 0 {
-                        println!("Tested:    {} {}", tested,
-                            if n_total > 0 { format!("/ {}", n_total) } else { String::new() });
+                        println!(
+                            "Tested:    {} {}",
+                            tested,
+                            if n_total > 0 {
+                                format!("/ {}", n_total)
+                            } else {
+                                String::new()
+                            }
+                        );
                         for (status, count) in &rows {
                             println!("  {:<16} {}", status, count);
                         }
                     }
                 }
             } else {
-                json_event(&cli, serde_json::json!({
-                    "event": "status",
-                    "preflight": "not_run",
-                    "total": 0,
-                }));
+                json_event(
+                    &cli,
+                    serde_json::json!({
+                        "event": "status",
+                        "preflight": "not_run",
+                        "total": 0,
+                    }),
+                );
 
                 if !cli.json {
                     println!("=== Pipeline Status ===");
@@ -81,9 +107,19 @@ fn main() -> anyhow::Result<()> {
         }
 
         Commands::Full {
-            concurrency, timeout, force, limit, config: config_path, rounds, verify_content,
+            concurrency,
+            timeout,
+            force,
+            limit,
+            config: config_path,
+            rounds,
+            verify_content,
+            no_verify_content,
         } => {
-            json_event(&cli, serde_json::json!({"event": "phase", "phase": "full", "status": "started"}));
+            json_event(
+                &cli,
+                serde_json::json!({"event": "phase", "phase": "full", "status": "started"}),
+            );
 
             // 默认断点续测：保留旧缓存，已测源自动跳过。
             // 仅 --force 时清除旧测试缓存和衍生输出，从头重测。
@@ -94,22 +130,29 @@ fn main() -> anyhow::Result<()> {
             remove_stale_outputs(&output_path);
 
             // ── Phase 1: Preflight ──
-            json_event(&cli, serde_json::json!({"event": "phase", "phase": "preflight", "status": "started"}));
+            json_event(
+                &cli,
+                serde_json::json!({"event": "phase", "phase": "preflight", "status": "started"}),
+            );
             ensure_fresh_source(&input_path, &output_path)?;
             let file = std::fs::File::open(&input_path)?;
             let reader = std::io::BufReader::new(file);
-            let sources: Vec<legado_source_filter::types::BookSource> = serde_json::from_reader(reader)?;
+            let sources: Vec<legado_source_filter::types::BookSource> =
+                serde_json::from_reader(reader)?;
             let preflight_out = preflight::run(sources);
             let db_path = output_path.join("test_cache.db");
             reporter::write_outputs(&output_path, &db_path, &preflight_out)?;
 
-            json_event(&cli, serde_json::json!({
-                "event": "preflight_summary",
-                "total_input": preflight_out.total_input,
-                "eligible": preflight_out.eligible.len(),
-                "skipped": preflight_out.skipped.len(),
-                "explore_only": preflight_out.explore_only.len(),
-            }));
+            json_event(
+                &cli,
+                serde_json::json!({
+                    "event": "preflight_summary",
+                    "total_input": preflight_out.total_input,
+                    "eligible": preflight_out.eligible.len(),
+                    "skipped": preflight_out.skipped.len(),
+                    "explore_only": preflight_out.explore_only.len(),
+                }),
+            );
 
             if !cli.json {
                 println!("\n=== Preflight ===");
@@ -121,8 +164,13 @@ fn main() -> anyhow::Result<()> {
             }
 
             // ── Phase 2: Build test config ──
+            let effective_verify = *verify_content && !*no_verify_content;
             let test_config = build_test_config(
-                *concurrency, *timeout, *force, *verify_content, config_path,
+                *concurrency,
+                *timeout,
+                *force,
+                effective_verify,
+                config_path,
             )?;
 
             let eligible = if let Some(n) = limit {
@@ -133,7 +181,10 @@ fn main() -> anyhow::Result<()> {
             };
 
             // ── Phase 3: Test campaign ──
-            json_event(&cli, serde_json::json!({"event": "phase", "phase": "test", "status": "started"}));
+            json_event(
+                &cli,
+                serde_json::json!({"event": "phase", "phase": "test", "status": "started"}),
+            );
             run_test_campaign(eligible, test_config, &output_path, cli.json, *rounds)?;
         }
     }

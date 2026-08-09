@@ -10,6 +10,9 @@ pub struct RequestSpec {
     pub body: Option<String>,
     pub headers: Vec<(String, String)>,
     pub charset: Option<String>,
+    /// Don't follow redirects (needed for java.post(...).header("Location")
+    /// rules, which read the redirect target from the response header).
+    pub no_redirect: bool,
 }
 
 /// Build an HTTP request spec from a book source and keyword.
@@ -44,6 +47,7 @@ pub fn build_request(source: &BookSource, keyword: &str) -> Option<RequestSpec> 
         body: None,
         headers: Vec::new(),
         charset: None,
+        no_redirect: false,
     })
 }
 
@@ -58,12 +62,17 @@ fn resolve_js_l1(search_url: &str, base_url: &str, keyword: &str) -> Option<Stri
     // Match: url = baseUrl + "/path/" + key  (possibly with encodeURI wrapping)
     let key_enc = urlencoding(keyword);
     let re = Regex::new(
-        r#"(?s)url\s*=\s*baseUrl\s*\+\s*"([^"]*)"\s*\+\s*(?:encodeURI\s*\(\s*)?key(?:\))?"#
-    ).ok()?;
+        r#"(?s)url\s*=\s*baseUrl\s*\+\s*"([^"]*)"\s*\+\s*(?:encodeURI\s*\(\s*)?key(?:\))?"#,
+    )
+    .ok()?;
     if let Some(caps) = re.captures(js_body) {
         let path = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let path_resolved = resolve_template(path, &key_enc);
-        return Some(format!("{}{}", base_url.trim_end_matches('/'), path_resolved));
+        return Some(format!(
+            "{}{}",
+            base_url.trim_end_matches('/'),
+            path_resolved
+        ));
     }
 
     None
@@ -77,27 +86,104 @@ fn resolve_template(s: &str, keyword: &str) -> String {
 }
 
 /// Resolve a possibly-relative URL against a base URL.
+///
+/// Handles:
+/// - absolute URLs (`http://`, `https://`)
+/// - protocol-relative URLs (`//host/path`)
+/// - absolute paths (`/path`) — resolved against base scheme+host
+/// - relative paths (`../path`, `./path`, `path`) — resolved against the
+///   base URL's directory
+/// - query-only URLs (`?a=1`) — appended to the base path
 pub fn resolve_url(url: &str, base: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() {
+        return base.to_string();
+    }
     if url.starts_with("http://") || url.starts_with("https://") {
         return url.to_string();
     }
-    let base = base.trim_end_matches('/');
-    let url = url.trim_start_matches('/');
-    format!("{}/{}", base, url)
+    // Protocol-relative: //host/path
+    if let Some(rest) = url.strip_prefix("//") {
+        if let Some(scheme) = base.split(':').next() {
+            return format!("{}://{}", scheme, rest);
+        }
+        return format!("https://{}", rest);
+    }
+    // Query-only: ?a=1 → keep base (drop fragment), append query
+    if let Some(q) = url.strip_prefix('?') {
+        let without_frag = base.split('#').next().unwrap_or(base);
+        return format!("{}?{}", without_frag, q);
+    }
+    // Fragment-only
+    if let Some(f) = url.strip_prefix('#') {
+        let without_frag = base.split('#').next().unwrap_or(base);
+        return format!("{}#{}", without_frag, f);
+    }
+
+    // If base is missing a scheme, try to fix it first
+    let base = if base.starts_with("http://") || base.starts_with("https://") {
+        base
+    } else {
+        return url.to_string();
+    };
+
+    // Split base into scheme://authority/path
+    let (head, base_path) = match base.find("://") {
+        Some(pos) => {
+            let rest = &base[pos + 3..];
+            match rest.find('/') {
+                Some(slash) => (&base[..pos + 3 + slash], &rest[slash..]),
+                None => (base, "/"),
+            }
+        }
+        None => ("", base),
+    };
+
+    if url.starts_with('/') {
+        // Absolute path: scheme://authority + path
+        return format!("{}{}", head, url);
+    }
+
+    // Relative path: resolve against base_path's directory
+    let base_dir = match base_path.rfind('/') {
+        Some(idx) => &base_path[..idx + 1],
+        None => "/",
+    };
+    let joined = format!("{}{}", base_dir, url);
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    format!("{}/{}", head, parts.join("/"))
 }
 
 /// Try to parse a search URL as a POST request in Legado format: `path,{dict}`.
 fn try_parse_post(search_url: &str, base_url: &str) -> Option<RequestSpec> {
-    // Check if there's a dict-style method declaration
-    let has_post = search_url.contains("'method':'POST'")
-        || search_url.contains("\"method\":\"POST\"")
-        || search_url.contains("'method':'post'")
-        || search_url.contains("\"method\":\"post\"");
-
-    if !has_post {
+    if !contains_post_marker(search_url) {
         return None;
     }
+    parse_post_request(search_url, base_url)
+}
 
+/// Whether a URL string declares the Legado POST convention (`'method':'POST'`).
+fn contains_post_marker(s: &str) -> bool {
+    s.contains("'method':'POST'")
+        || s.contains("\"method\":\"POST\"")
+        || s.contains("'method':'post'")
+        || s.contains("\"method\":\"post\"")
+}
+
+/// Parse a `url,{method,body,charset,...}` Legado POST spec into a RequestSpec.
+///
+/// Public so the tester can apply the same parsing to URLs produced by the
+/// JS polyfill (which may emit POST conventions too).
+pub fn parse_post_request(search_url: &str, base_url: &str) -> Option<RequestSpec> {
     // Extract body content
     let body = extract_post_body(search_url)?;
     let charset = extract_charset(search_url);
@@ -121,10 +207,38 @@ fn try_parse_post(search_url: &str, base_url: &str) -> Option<RequestSpec> {
         body: Some(body),
         headers: Vec::new(),
         charset,
+        no_redirect: false,
     })
 }
 
 fn extract_post_body(s: &str) -> Option<String> {
+    // JSON-object body: `'body':{'keyword':'{{key}}'}` or `"body":{...}`
+    if let Some(start) = s.find("body") {
+        let after_key = &s[start + 4..];
+        if let Some(colon) = after_key.find(':') {
+            let value = after_key[colon + 1..].trim_start();
+            if value.starts_with('{') {
+                // Find the matching closing brace (naive scan; body objects are
+                // simple key:value dicts in practice).
+                let mut depth = 0i32;
+                let mut in_str = false;
+                for (i, ch) in value.char_indices() {
+                    match ch {
+                        '"' | '\'' => in_str = !in_str,
+                        '{' if !in_str => depth += 1,
+                        '}' if !in_str => {
+                            depth -= 1;
+                            if depth == 0 {
+                                let obj = &value[..=i];
+                                return Some(obj.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     // Try single-quote: 'body':'...'
     let re_single = Regex::new(r"'body'\s*:\s*'([^']*)'").ok()?;
     if let Some(caps) = re_single.captures(s) {
@@ -150,6 +264,41 @@ fn extract_charset(s: &str) -> Option<String> {
         return Some(caps[1].to_string().to_lowercase());
     }
     None
+}
+
+/// Build request headers for a source: parse the `header` field (Python-dict
+/// syntax) and add a `Referer` pointing at the source site (most content pages
+/// require it), unless the source explicitly sets one.
+pub fn source_headers(source: &BookSource) -> Vec<(String, String)> {
+    let mut headers = crate::http_client::parse_headers(source.header.as_deref().unwrap_or(""));
+    let has_referer = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("Referer"));
+    if !has_referer {
+        let base = source
+            .bookSourceUrl
+            .split('#')
+            .next()
+            .unwrap_or(&source.bookSourceUrl)
+            .trim_end_matches('/');
+        if base.starts_with("http://") || base.starts_with("https://") {
+            headers.push(("Referer".to_string(), base.to_string()));
+        }
+    }
+    headers
+}
+
+/// Build headers for a resolved URL, merging source headers with a Referer
+/// for a specific page being fetched.
+pub fn page_headers(source_headers: &[(String, String)], page_url: &str) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = source_headers.to_vec();
+    let has_referer = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("Referer"));
+    if !has_referer && !page_url.is_empty() {
+        headers.push(("Referer".to_string(), page_url.to_string()));
+    }
+    headers
 }
 
 fn urlencoding(s: &str) -> String {
@@ -190,6 +339,60 @@ mod tests {
     }
 
     #[test]
+    fn test_url_resolve_protocol_relative() {
+        assert_eq!(
+            resolve_url("//cdn.example.com/img/a.jpg", "https://example.com"),
+            "https://cdn.example.com/img/a.jpg"
+        );
+        assert_eq!(
+            resolve_url("//cdn.example.com/img/a.jpg", "http://example.com"),
+            "http://cdn.example.com/img/a.jpg"
+        );
+    }
+
+    #[test]
+    fn test_url_resolve_relative_path_traversal() {
+        // base has a path directory
+        assert_eq!(
+            resolve_url("chapter/1.html", "https://example.com/novel/"),
+            "https://example.com/novel/chapter/1.html"
+        );
+        assert_eq!(
+            resolve_url("../chap/2.html", "https://example.com/novel/book/"),
+            "https://example.com/novel/chap/2.html"
+        );
+        // absolute path drops base path
+        assert_eq!(
+            resolve_url("/api/list", "https://example.com/novel/book/"),
+            "https://example.com/api/list"
+        );
+    }
+
+    #[test]
+    fn test_url_resolve_query_only() {
+        assert_eq!(
+            resolve_url("?page=2", "https://example.com/novel/1.html"),
+            "https://example.com/novel/1.html?page=2"
+        );
+    }
+
+    #[test]
+    fn test_url_resolve_fragment() {
+        assert_eq!(
+            resolve_url("#top", "https://example.com/novel/1.html"),
+            "https://example.com/novel/1.html#top"
+        );
+    }
+
+    #[test]
+    fn test_url_resolve_empty() {
+        assert_eq!(
+            resolve_url("", "https://example.com"),
+            "https://example.com"
+        );
+    }
+
+    #[test]
     fn test_url_resolve_absolute() {
         assert_eq!(
             resolve_url("https://other.com/search", "https://example.com"),
@@ -205,5 +408,32 @@ mod tests {
 
         let charset = extract_charset(s);
         assert_eq!(charset, Some("gbk".into()));
+    }
+
+    #[test]
+    fn test_post_body_extraction_json_object() {
+        let s = "http://www.lianjianxsw.com/search,{\"method\":\"POST\",\"body\":{\"keyword\":\"重生\"}}";
+        let spec = parse_post_request(s, "http://www.lianjianxsw.com/").unwrap();
+        assert_eq!(spec.url, "http://www.lianjianxsw.com/search");
+        assert_eq!(spec.method, "POST");
+        assert_eq!(spec.body.as_deref(), Some("{\"keyword\":\"重生\"}"));
+    }
+
+    #[test]
+    fn test_post_body_extraction_json_object_single_quotes() {
+        // Legado JS often emits single-quoted dicts
+        let s = "http://www.lianjianxsw.com/search,{'method':'POST','body':{'keyword':'重生'}}";
+        let spec = parse_post_request(s, "http://www.lianjianxsw.com/").unwrap();
+        assert_eq!(spec.url, "http://www.lianjianxsw.com/search");
+        assert_eq!(spec.body.as_deref(), Some("{'keyword':'重生'}"));
+    }
+
+    #[test]
+    fn test_build_request_js_post_through_parse() {
+        // Simulate a JS-produced POST URL (what the polyfill emits).
+        let s = "http://www.lianjianxsw.com/search,{'method':'POST','body':{'keyword':'重生'}}";
+        let spec = parse_post_request(s, "http://www.lianjianxsw.com/").unwrap();
+        assert_eq!(spec.method, "POST");
+        assert!(spec.body.as_deref().unwrap().contains("重生"));
     }
 }

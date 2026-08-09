@@ -30,16 +30,17 @@ pub fn extract(json: &Value, tokens: &[RuleToken]) -> Vec<String> {
                     }
                 }
             } else if let Some(rest) = path.strip_prefix("$[")
-                && (rest.starts_with("*]") || rest.starts_with('*')) {
-                    let after_bracket = rest.split(']').nth(1).unwrap_or("");
-                    path_parts = after_bracket.split('.').filter(|p| !p.is_empty()).collect();
-                    if let Value::Array(arr) = json {
-                        for item in arr {
-                            collect_values(item, &path_parts, &mut results);
-                        }
-                        return results;
+                && (rest.starts_with("*]") || rest.starts_with('*'))
+            {
+                let after_bracket = rest.split(']').nth(1).unwrap_or("");
+                path_parts = after_bracket.split('.').filter(|p| !p.is_empty()).collect();
+                if let Value::Array(arr) = json {
+                    for item in arr {
+                        collect_values(item, &path_parts, &mut results);
                     }
+                    return results;
                 }
+            }
 
             collect_values(json, &path_parts, &mut results);
         }
@@ -66,6 +67,23 @@ pub fn extract(json: &Value, tokens: &[RuleToken]) -> Vec<String> {
     results
 }
 
+/// Find a single value by a simple dot/bracket path (e.g. `data.list[0].name`).
+/// Returns the first match as a string, or None. Used to resolve `{{$.field}}`
+/// placeholders in templates where the path isn't a full Legado rule.
+pub fn json_path_find(json: &Value, path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    // Normalize `$.x` → `x` style
+    let path = path.trim_start_matches("$.").trim_start_matches('$');
+    let path = path.strip_prefix('.').unwrap_or(path);
+
+    let tokens = super::parser::tokenize(&format!("$.{}", path));
+    let vals = extract(json, &tokens);
+    vals.into_iter().find(|v| !v.is_empty())
+}
+
 fn collect_values(value: &Value, path_parts: &[&str], results: &mut Vec<String>) {
     if path_parts.is_empty() {
         results.push(stringify_value(value));
@@ -81,7 +99,11 @@ fn collect_values(value: &Value, path_parts: &[&str], results: &mut Vec<String>)
                 for item in arr {
                     collect_values(item, tail, results);
                 }
-            } else if let Ok(idx) = head.trim_start_matches('[').trim_end_matches(']').parse::<usize>() {
+            } else if let Ok(idx) = head
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<usize>()
+            {
                 if idx < arr.len() {
                     collect_values(&arr[idx], tail, results);
                 }
@@ -117,7 +139,8 @@ mod tests {
 
     #[test]
     fn test_simple_jsonpath() {
-        let json: Value = serde_json::from_str(r#"{"data":[{"name":"Book1"},{"name":"Book2"}]}"#).unwrap();
+        let json: Value =
+            serde_json::from_str(r#"{"data":[{"name":"Book1"},{"name":"Book2"}]}"#).unwrap();
         let tokens = tokenize("$.data[*].name");
         let results = extract(&json, &tokens);
         assert_eq!(results, vec!["Book1", "Book2"]);

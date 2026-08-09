@@ -11,9 +11,11 @@ pub fn fix_url(raw: &str) -> Option<String> {
     // [图片]http://... → strip prefix.
     // Only match at protocol start to avoid matching "http" in URL paths.
     if let Some(pos) = trimmed.find("http://").or_else(|| trimmed.find("https://"))
-        && pos > 0 && trimmed[..pos].contains("图片") {
-            return Some(trimmed[pos..].to_string());
-        }
+        && pos > 0
+        && trimmed[..pos].contains("图片")
+    {
+        return Some(trimmed[pos..].to_string());
+    }
 
     // http:www.xxx.com → add slash
     if trimmed.starts_with("http:") && !trimmed.starts_with("http://") {
@@ -29,7 +31,10 @@ pub fn fix_url(raw: &str) -> Option<String> {
     if let Some(dot_pos) = trimmed.find('.') {
         let before_dot = &trimmed[..dot_pos];
         // must start with an alphanumeric char (not whitespace, not emoji)
-        if before_dot.chars().next().is_some_and(|c| c.is_alphanumeric())
+        if before_dot
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric())
             && !trimmed.contains(char::is_whitespace)
             && !trimmed.contains("：")
         {
@@ -46,8 +51,14 @@ mod tests {
 
     #[test]
     fn test_already_valid() {
-        assert_eq!(fix_url("https://example.com"), Some("https://example.com".into()));
-        assert_eq!(fix_url("http://example.com"), Some("http://example.com".into()));
+        assert_eq!(
+            fix_url("https://example.com"),
+            Some("https://example.com".into())
+        );
+        assert_eq!(
+            fix_url("http://example.com"),
+            Some("http://example.com".into())
+        );
     }
 
     #[test]

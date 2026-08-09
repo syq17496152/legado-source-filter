@@ -47,7 +47,8 @@ cargo run -- status
 | `--limit N` | full | 只测前 N 个源 |
 | `--force` | full | 清除缓存，全部从头重新测试；默认保留缓存断点续测 |
 | `--config PATH` | full | 指定 config.toml 路径（可选） |
-| `--verify-content` | full | 额外验证首个搜索结果的书籍页可读（ruleContent），通过才判 passed |
+| `--verify-content[=false]` | full | 完整阅读链路验证（默认开启）；传 `=false` 关闭 |
+| `--no-verify-content` | full | 关闭阅读链路验证，仅验证搜索能力 |
 | `--json` | 全局 | 输出 JSON Lines 到 stdout，适合 AI 解析 |
 | `-o`, `--output DIR` | 全局 | 输出目录（默认 XDG_CACHE_HOME） |
 
@@ -110,14 +111,50 @@ author = "铁马飞桥"
 
 | 文件 | 说明 |
 |------|------|
-| `filtered.json` | 测试通过的可用书源，直接导入 Legado |
+| `filtered.json` | **完整阅读链路验证通过**的可用书源，直接导入 Legado |
 | `explore_only.json` | 仅支持「发现」功能、不支持搜索的书源 |
 | `test_cache.db` | SQLite 缓存 + 运行时数据（eligible、report） |
+
+## 验证深度：搜索 vs 完整阅读链路
+
+默认（`--verify-content` 默认开启）下，书源必须通过**完整阅读链路验证**才会进入 `filtered.json`：
+
+```
+搜索(ruleSearch) → 书籍详情页(ruleBookInfo) → 目录页(ruleToc) → 第一章正文(ruleContent)
+```
+
+每个环节都会真实发请求并解析，任何一环失败（如目录规则失效、正文为空、站点 403/404/反爬）都记为 `failed`，带具体原因：
+
+| 失败原因 | 含义 |
+|----------|------|
+| `bookinfo_fetch` / `toc_fetch` / `chapter_fetch` | 对应页面请求失败（瞬时，后续轮次会重试） |
+| `toc_parse` | 目录规则提取不到章节链接（规则已失效） |
+| `content_short` | 正文过短（<50 字符），疑似解析错误 |
+| `blocked` | HTTP 403/401，站点反爬 |
+| `not_found` | HTTP 404 |
+| `rate_limited` | HTTP 408/429 限流 |
+| `no_results` | 搜索无结果（可能站内无此书或规则失效） |
+
+JS 规则里的 `java.ajax(url)` / `java.post(url)` 会通过 **node↔Rust 交互桥**真实发
+HTTP 请求（携带 source.header + Referer），响应体回传 JS 继续求值——正文需要二次请求
+的源（解密、取 token、分页接口等）也能被正确验证。桥的请求不跟随重定向，支持
+`java.post(...).header("Location")` 读取 302 响应头。
+
+JS 规则支持 Legado 的多种惯用写法，均能正确构建请求：
+- **裸表达式结尾**：`@js:...\n"https://api/"+path` 之类的规则，以最后一条表达式的值作为结果
+- **POST 约定**：`url,{"key":...}` 或 JS 里的 `java.post(url, body, headers)` 会真实发 POST，
+  body 原样发送（不做 url-encoded）
+- **JSON-object body**：`{"keyword":{{key}}}` 形式的 POST body 能正确提取
+- **`{{$.field}}` 占位符**：详情页返回的字段（含 `_id`/`total_num` 等非固定字段）会回填到
+  目录 URL 模板中
+
+`--no-verify-content` 可回退到旧的「仅验证搜索」模式。
 
 ## 技术栈
 
 - **语言**: Rust（tokio + reqwest）
 - **HTML 解析**: scraper（Servo CSS 引擎）
 - **编码探测**: chardetng + encoding_rs
-- **JS 执行**: Node.js polyfill（可选依赖）
+- **JS 执行**: Node.js polyfill（可选依赖）；`java.ajax` 经 stdin/stdout 桥回调 Rust 真实发 HTTP
 - **缓存**: rusqlite（SQLite，支持断点续测）
+- **阅读链路验证**: content_check 模块，真实走 搜索→详情→目录→正文 四跳

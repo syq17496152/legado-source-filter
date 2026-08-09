@@ -6,11 +6,7 @@ pub mod parser;
 use crate::types::SearchRule;
 
 /// Parse a rule string and extract values from content (HTML or JSON).
-pub fn extract_results(
-    content: &str,
-    content_type: &str,
-    rule: &SearchRule,
-) -> Vec<Vec<String>> {
+pub fn extract_results(content: &str, content_type: &str, rule: &SearchRule) -> Vec<Vec<String>> {
     let mut results = Vec::new();
 
     // Apply bookList to get items
@@ -41,6 +37,40 @@ pub fn extract_results(
                 book_url.first().cloned().unwrap_or_default(),
                 cover_url.first().cloned().unwrap_or_default(),
             ]);
+        }
+    }
+
+    results
+}
+
+/// Parse a TOC rule and extract (chapter_name, chapter_url) pairs.
+pub fn extract_toc(
+    content: &str,
+    content_type: &str,
+    rule: &crate::types::TocRule,
+) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+
+    if let Some(ref cl) = rule.chapterList {
+        let tokens = parser::tokenize(cl);
+        let items = if content_type.contains("json") {
+            if let Ok(json) = serde_json::from_str(content) {
+                json_extractor::extract(&json, &tokens)
+            } else {
+                Vec::new()
+            }
+        } else {
+            html_extractor::extract(content, &tokens)
+        };
+
+        for item in &items {
+            let name = apply_extract(item, content_type, &rule.chapterName, 0);
+            let url = apply_extract(item, content_type, &rule.chapterUrl, 0);
+            let name = name.first().cloned().unwrap_or_default();
+            let url = url.first().cloned().unwrap_or_default();
+            if !name.is_empty() || !url.is_empty() {
+                results.push((name, url));
+            }
         }
     }
 
@@ -80,7 +110,12 @@ pub fn has_valid_results(results: &[Vec<String>]) -> bool {
     false
 }
 
-fn apply_extract(content: &str, content_type: &str, rule: &Option<String>, _index: usize) -> Vec<String> {
+fn apply_extract(
+    content: &str,
+    content_type: &str,
+    rule: &Option<String>,
+    _index: usize,
+) -> Vec<String> {
     match rule {
         Some(r) if !r.is_empty() => {
             let tokens = parser::tokenize(r);
@@ -153,8 +188,17 @@ mod tests {
     #[test]
     fn test_has_valid_results() {
         assert!(!has_valid_results(&[]), "empty list should be invalid");
-        assert!(!has_valid_results(&[vec!["".into(), "".into()]]), "empty fields should be invalid");
-        assert!(has_valid_results(&[vec!["Book".into(), "".into()]]), "name only should be valid");
-        assert!(has_valid_results(&[vec!["".into(), "Author".into()]]), "author only should be valid");
+        assert!(
+            !has_valid_results(&[vec!["".into(), "".into()]]),
+            "empty fields should be invalid"
+        );
+        assert!(
+            has_valid_results(&[vec!["Book".into(), "".into()]]),
+            "name only should be valid"
+        );
+        assert!(
+            has_valid_results(&[vec!["".into(), "Author".into()]]),
+            "author only should be valid"
+        );
     }
 }

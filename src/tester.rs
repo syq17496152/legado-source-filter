@@ -87,10 +87,17 @@ pub async fn run(
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
             let current = completed_progress.load(std::sync::atomic::Ordering::Relaxed);
-            if current >= total { break; }
+            if current >= total {
+                break;
+            }
             if current > last {
                 if !quiet {
-                    println!("Progress: {}/{} ({:.0}%)", current, total, current as f64 / total as f64 * 100.0);
+                    println!(
+                        "Progress: {}/{} ({:.0}%)",
+                        current,
+                        total,
+                        current as f64 / total as f64 * 100.0
+                    );
                 }
                 last = current;
             }
@@ -114,26 +121,28 @@ pub async fn run(
 
             // Check cache first (skipped entirely under --force)
             if !config.force
-                && let Ok(Some((status, _))) = cache.check(&source.bookSourceUrl, &source.bookSourceName) {
-                    match status.as_str() {
-                        "passed" => {
-                            passed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return;
-                        }
-                        "failed" => {
-                            // Re-test failed sources
-                        }
-                        "dead_domain" => {
-                            cached.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return;
-                        }
-                        "js_api" => {
-                            cached.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return;
-                        }
-                        _ => {}
+                && let Ok(Some((status, _))) =
+                    cache.check(&source.bookSourceUrl, &source.bookSourceName)
+            {
+                match status.as_str() {
+                    "passed" => {
+                        passed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return;
                     }
+                    "failed" => {
+                        // Re-test failed sources
+                    }
+                    "dead_domain" => {
+                        cached.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    "js_api" => {
+                        cached.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
+                    _ => {}
                 }
+            }
 
             // Check startBrowserAwait — unrecoverable
             let su = source.searchUrl.as_deref().unwrap_or("");
@@ -141,8 +150,13 @@ pub async fn run(
             let needs_js = (su.starts_with("@js:") || su.contains("<js>")) && !is_startbrowser;
 
             if is_startbrowser {
-                if let Err(e) = cache.save(&source.bookSourceUrl, &source.bookSourceName, "js_api", None, 0)
-                {
+                if let Err(e) = cache.save(
+                    &source.bookSourceUrl,
+                    &source.bookSourceName,
+                    "js_api",
+                    None,
+                    0,
+                ) {
                     warn!("cache save failed for {}: {}", source.bookSourceName, e);
                 }
                 // Use into_inner() to recover from a poisoned mutex
@@ -159,6 +173,7 @@ pub async fn run(
 
             let base_url = source.bookSourceUrl.clone();
             let js_code = su.to_string();
+            let src_headers = crate::search_url::source_headers(&source);
 
             let mut all_spec_failed = true;
             let mut any_network_error = false;
@@ -169,8 +184,9 @@ pub async fn run(
 
             for keyword in &keywords {
                 // Rust-side request builder handles templates and @js: L1
-                if let Some(spec) = search_url::build_request(&source, keyword) {
+                if let Some(mut spec) = search_url::build_request(&source, keyword) {
                     all_spec_failed = false;
+                    spec.headers = src_headers.clone();
                     specs.push((keyword.clone(), spec));
                 } else if needs_js {
                     // L2/L3 @js: and <js> sources go through the JS polyfill
@@ -183,33 +199,48 @@ pub async fn run(
                 }
             }
 
-            // Evaluate all JS jobs in ONE node process
+            // Evaluate all JS jobs in ONE node process (with java.ajax bridge
+            // so `@js` search rules that issue their own HTTP get real answers)
             if !js_jobs.is_empty() {
-                let (js_results, js_jobs) = tokio::task::spawn_blocking(move || {
-                    let out = crate::js_polyfill::runner::execute_js_batch(&js_jobs);
+                let src_headers_clone = src_headers.clone();
+                let (js_results, js_jobs) = {
+                    let client_ref = client.clone();
+                    let out = crate::js_polyfill::runner::execute_js_batch_async(
+                        &js_jobs,
+                        &client_ref,
+                        &src_headers_clone,
+                    )
+                    .await;
                     (out, js_jobs)
-                })
-                .await
-                .unwrap_or_default();
+                };
                 for (job, url) in js_jobs.iter().zip(js_results.iter()) {
                     if let Some(url) = url.as_deref().filter(|u| !u.trim().is_empty()) {
                         all_spec_failed = false;
-                        specs.push((
-                            job.keyword.clone(),
+                        // JS rules may emit Legado POST convention (`url,{...}`) —
+                        // parse it just like the Rust-side builder does.
+                        let mut spec = if let Some(s) =
+                            crate::search_url::parse_post_request(url, &base_url)
+                        {
+                            s
+                        } else {
                             crate::search_url::RequestSpec {
                                 url: url.to_string(),
                                 method: "GET".to_string(),
                                 body: None,
                                 headers: Vec::new(),
                                 charset: None,
-                            },
-                        ));
+                                no_redirect: false,
+                            }
+                        };
+                        spec.headers = src_headers.clone();
+                        specs.push((job.keyword.clone(), spec));
                     }
                 }
             }
 
             // ── Phase 2: fetch each spec and evaluate search results ──
-            let mut content_failed = false;
+            let mut content_failed: Option<String> = None;
+            let mut http_reason: Option<&'static str> = None;
             for (keyword, spec) in &specs {
                 // First attempt
                 let result = client.fetch(spec).await;
@@ -223,13 +254,23 @@ pub async fn run(
                         match client.fetch(spec).await {
                             Ok(r) => r,
                             Err(e2) => {
-                                warn!("{}: request failed after retry: {}", source.bookSourceName, e2);
+                                warn!(
+                                    "{}: request failed after retry: {}",
+                                    source.bookSourceName, e2
+                                );
                                 any_network_error = true;
                                 continue;
                             }
                         }
                     }
                 };
+
+                // Non-2xx statuses often mean "the site blocks us" rather than
+                // "no results" — record a distinct reason so the report is honest.
+                if result.status_code >= 400 {
+                    let label = crate::http_client::classify_status(result.status_code);
+                    http_reason = Some(label);
+                }
 
                 // Determine content type for parsing.
                 // Prefer the response Content-Type header; only fall back to URL
@@ -254,13 +295,18 @@ pub async fn run(
                     let results = rule_dsl::extract_results(&result.body_text, &content_type, rule);
 
                     if rule_dsl::has_valid_results(&results) {
-                        // Optional secondary check: verify the first book page
-                        // yields readable content (ruleContent).
+                        // Optional secondary check: walk the full reading chain
+                        // (book info → toc → first chapter content) and confirm
+                        // ruleContent yields real readable text.
                         if config.verify_content
-                            && !verify_book_content(&client, &source, &results, &base_url).await
+                            && let Some(fail) =
+                                verify_reading_chain(&client, &source, &results, &base_url).await
                         {
-                            content_failed = true;
-                            info!("{}: search ok but content unverified", source.bookSourceName);
+                            info!(
+                                "{}: search ok but content unverified: {}",
+                                source.bookSourceName, fail
+                            );
+                            content_failed = Some(fail);
                             continue;
                         }
 
@@ -277,8 +323,7 @@ pub async fn run(
                             "passed",
                             None,
                             1,
-                        )
-                        {
+                        ) {
                             warn!("cache save failed for {}: {}", source.bookSourceName, e);
                         }
                         passed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -289,23 +334,24 @@ pub async fn run(
 
             // All keywords failed — classify the reason
             let (fail_reason, retry_count) = if all_spec_failed {
-                ("builder_error", 0u32)
-            } else if content_failed {
-                ("content_unverified", 1)
+                ("builder_error".to_string(), 0u32)
+            } else if let Some(stage) = content_failed {
+                (stage, 1)
             } else if any_network_error {
-                ("network_error", 1)
+                ("network_error".to_string(), 1)
+            } else if let Some(reason) = http_reason {
+                (reason.to_string(), 1)
             } else {
-                ("no_results", 1)
+                ("no_results".to_string(), 1)
             };
             info!("{}: FAILED (reason={})", source.bookSourceName, fail_reason);
             if let Err(e) = cache.save(
                 &source.bookSourceUrl,
                 &source.bookSourceName,
                 "failed",
-                Some(fail_reason),
+                Some(&fail_reason),
                 retry_count,
-            )
-            {
+            ) {
                 warn!("cache save failed for {}: {}", source.bookSourceName, e);
             }
             failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -343,24 +389,26 @@ fn select_keywords(source: &BookSource, config: &TestConfig) -> Vec<String> {
 
     // Priority 1: checkKeyWord from ruleSearch
     if let Some(ref rs) = source.ruleSearch
-        && let Some(ref kw) = rs.checkKeyWord {
-            let trimmed = kw.trim();
-            if !trimmed.is_empty() && tried.insert(trimmed.to_string()) {
-                keywords.push(trimmed.to_string());
-                if keywords.len() >= 3 {
-                    return keywords;
-                }
+        && let Some(ref kw) = rs.checkKeyWord
+    {
+        let trimmed = kw.trim();
+        if !trimmed.is_empty() && tried.insert(trimmed.to_string()) {
+            keywords.push(trimmed.to_string());
+            if keywords.len() >= 3 {
+                return keywords;
             }
         }
+    }
 
     // Priority 2: domain-matched test books
     let url = source.bookSourceUrl.to_lowercase();
     for book in &config.test_books {
         if let Some(ref hint) = book.domain_hint
             && url.contains(&hint.to_lowercase())
-                && tried.insert(book.name.clone()) {
-                    keywords.push(book.name.clone());
-                }
+            && tried.insert(book.name.clone())
+        {
+            keywords.push(book.name.clone());
+        }
     }
 
     // Fill up to 3 with generic keywords and test books
@@ -389,48 +437,38 @@ fn select_keywords(source: &BookSource, config: &TestConfig) -> Vec<String> {
     keywords
 }
 
-/// Secondary verification for `--verify-content`: fetch the first search
-/// result's book page and check that ruleContent extracts non-empty content.
-/// Returns true (pass) when there is no book URL or no content rule to check.
-async fn verify_book_content(
+/// Secondary verification for `--verify-content`: walk the full reading chain
+/// (book detail → TOC → first chapter) and confirm ruleContent extracts
+/// readable text. Returns `Some(stage)` on failure, `None` on pass or when
+/// there is no book URL to follow (cannot verify → treat as OK).
+async fn verify_reading_chain(
     client: &HttpClient,
     source: &BookSource,
     results: &[Vec<String>],
     base_url: &str,
-) -> bool {
-    let rule_content = match source.ruleContent.as_ref().and_then(|c| c.content.as_deref()) {
-        Some(r) if !r.trim().is_empty() => r,
-        _ => return true, // no content rule → cannot verify → treat as OK
-    };
-
+) -> Option<String> {
     let book_url = results
         .first()
         .and_then(|row| row.get(2))
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let Some(book_url) = book_url else {
-        return true; // no book URL to follow → cannot verify → treat as OK
+        return None; // no book URL to follow → cannot verify → treat as OK
     };
+    let book_url = crate::search_url::resolve_url(&book_url, base_url);
 
-    let spec = crate::search_url::RequestSpec {
-        url: crate::search_url::resolve_url(&book_url, base_url),
-        method: "GET".to_string(),
-        body: None,
-        headers: Vec::new(),
-        charset: None,
-    };
-
-    let Ok(result) = client.fetch(&spec).await else {
-        return false;
-    };
-    if result.body_text.trim().is_empty() {
-        return false;
-    }
-    let ct = if result.content_type.contains("json") {
-        "json"
+    let verdict = crate::content_check::verify_chain(client, source, &book_url, base_url).await;
+    if verdict.ok {
+        info!(
+            "{}: chain OK ({} chars)",
+            source.bookSourceName, verdict.content_len
+        );
+        None
     } else {
-        "html"
-    };
-    let extracted = rule_dsl::extract_single(&result.body_text, ct, rule_content);
-    extracted.iter().any(|t| !t.trim().is_empty())
+        info!(
+            "{}: chain failed at {} ({})",
+            source.bookSourceName, verdict.stage, verdict.detail
+        );
+        Some(verdict.stage.to_string())
+    }
 }
