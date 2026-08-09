@@ -609,7 +609,7 @@ mod tests {
                         }
                         p if p.starts_with("/c/") => {
                             let page: usize = p[3..].parse().unwrap_or(1);
-                            let next = if page < pages {
+                            if page < pages {
                                 format!(
                                     "<html><div id='next' href='/c/{}'>下一页</div><p>{}</p></html>",
                                     page + 1,
@@ -620,8 +620,7 @@ mod tests {
                                     "<html><div id='next'></div><p>{}</p></html>",
                                     "正".repeat(200)
                                 )
-                            };
-                            next
+                            }
                         }
                         _ => "not found".to_string(),
                     };

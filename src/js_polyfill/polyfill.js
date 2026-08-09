@@ -132,9 +132,21 @@ globalThis.java = {
     aesBase64DecodeToString: function(str, key, mode, iv) {
         try {
             const crypto = require('crypto');
-            const keyBuf = Buffer.from(String(key), 'utf8');
+            const keyStr = String(key);
+            const keyBuf = Buffer.from(keyStr, 'utf8');
+            const modeStr = String(mode || '');
+            // DESede (3DES): key 24 bytes, iv 8 bytes, CBC/PKCS5 by default.
+            if (/DES(?:ede|3)/i.test(modeStr) || (keyBuf.length === 24 && modeStr.indexOf('DES') === 0)) {
+                const ivStr = iv ? String(iv) : '';
+                const ivBuf = ivStr ? Buffer.from(ivStr, 'utf8') : Buffer.alloc(8);
+                const decipher = crypto.createDecipheriv('des-ede3-cbc', keyBuf, ivBuf);
+                let dec = decipher.update(Buffer.from(String(str).replace(/-/g, '+').replace(/_/g, '/'), 'base64'), '', 'utf8');
+                dec += decipher.final('utf8');
+                return dec;
+            }
+            // AES: key 16/24/32 bytes → aes-128/192/256-cbc.
             const ivBuf = iv ? Buffer.from(String(iv), 'utf8') : Buffer.alloc(16);
-            const algo = keyBuf.length === 32 ? 'aes-256-cbc' : 'aes-128-cbc';
+            const algo = keyBuf.length === 32 ? 'aes-256-cbc' : (keyBuf.length === 24 ? 'aes-192-cbc' : 'aes-128-cbc');
             const decipher = crypto.createDecipheriv(algo, keyBuf, ivBuf);
             let dec = decipher.update(Buffer.from(String(str).replace(/-/g, '+').replace(/_/g, '/'), 'base64'), '', 'utf8');
             dec += decipher.final('utf8');
@@ -621,5 +633,114 @@ globalThis.org = globalThis.Packages.org;
 globalThis.jsoup = globalThis.Packages.org.jsoup;
 
 globalThis.JavaImporter = function() { return function() {}; };
+
+// ── Java crypto classes (SecretKeySpec / IvParameterSpec / Base64 / Cipher) ──
+// Sources that decrypt paginated content use the classic Java API:
+//   key = SecretKeySpec(String("...").getBytes(), "DESede");
+//   iv  = IvParameterSpec(String("...").getBytes());
+//   bytes = Base64.decode(String(str).getBytes(), 2);
+//   chipher = Cipher.getInstance("DESede/CBC/PKCS5Padding");
+//   chipher.init(2, key, iv);
+//   return String(chipher.doFinal(bytes));
+// Polyfilling these lets `content_check` actually verify such sources.
+
+// String.getBytes() — legacy Java call used by crypto sources.
+if (typeof String.prototype.getBytes !== 'function') {
+    String.prototype.getBytes = function() {
+        const s = String(this);
+        const arr = new Uint8Array(s.length);
+        for (let i = 0; i < s.length; i++) arr[i] = s.charCodeAt(i) & 0xff;
+        return arr;
+    };
+}
+
+const __byteArrayOf = function(v) {
+    if (typeof v === 'string') {
+        const s = String(v);
+        const arr = new Uint8Array(s.length);
+        for (let i = 0; i < s.length; i++) arr[i] = s.charCodeAt(i) & 0xff;
+        return arr;
+    }
+    if (v instanceof Uint8Array || Array.isArray(v)) return new Uint8Array(v);
+    if (v instanceof Buffer) return new Uint8Array(v);
+    return new Uint8Array(0);
+};
+globalThis.SecretKeySpec = function(key, algorithm) {
+    if (!(this instanceof SecretKeySpec)) return new SecretKeySpec(key, algorithm);
+    this.key = __byteArrayOf(key);
+    this.algorithm = String(algorithm || 'AES');
+};
+
+globalThis.IvParameterSpec = function(iv) {
+    if (!(this instanceof IvParameterSpec)) return new IvParameterSpec(iv);
+    this.iv = __byteArrayOf(iv);
+};
+
+// `with(javaImport)` exposes crypto classes to rules that use JavaImporter.
+globalThis.javaImport = {};
+
+// java.util.Base64.decode(byte[], flags)
+globalThis.Base64 = {
+    decode: function(input, flags) {
+        const bytes = __byteArrayOf(input);
+        // input is the ASCII bytes of a base64 string — decode in one step.
+        const buf = Buffer.from(bytes);
+        return Buffer.from(buf.toString('utf8').trim(), 'base64');
+    }
+};
+
+// Cipher.getInstance("AES/CBC/PKCS5Padding"); init(2=DECRYPT, key, iv); doFinal(bytes)
+globalThis.Cipher = {
+    getInstance: function(transform) {
+        const t = String(transform || '');
+        const cipher = {};
+        let keySpec = null;
+        let ivSpec = null;
+        let mode = 2;
+        cipher.init = function(m, key, iv) {
+            mode = m;
+            keySpec = key && key.key ? key : null;
+            ivSpec = iv && iv.iv ? iv : null;
+        };
+        cipher.doFinal = function(bytes) {
+            if (!keySpec) return Buffer.alloc(0);
+            try {
+                const crypto = require('crypto');
+                const keyBuf = Buffer.from(keySpec.key);
+                const ivBuf = ivSpec ? Buffer.from(ivSpec.iv) : null;
+                const dataBuf = Buffer.from(__byteArrayOf(bytes));
+                // DESede: 24-byte key / 8-byte iv. DES: 8-byte key / 8-byte iv.
+                if (/DES(?:ede|3)/i.test(t)) {
+                    const algo = ivBuf ? 'des-ede3-cbc' : 'des-ede3';
+                    const algoName = keyBuf.length === 24 ? algo : 'des-ede3-cbc';
+                    const dec = crypto.createDecipheriv(algoName, keyBuf, ivBuf || Buffer.alloc(8));
+                    return Buffer.concat([dec.update(dataBuf), dec.final()]);
+                }
+                if (/DES\//i.test(t) && !/DESede|DES3/i.test(t)) {
+                    const dec = crypto.createDecipheriv('des-cbc', keyBuf, ivBuf || Buffer.alloc(8));
+                    return Buffer.concat([dec.update(dataBuf), dec.final()]);
+                }
+                const algo = keyBuf.length === 32 ? 'aes-256-cbc' : (keyBuf.length === 24 ? 'aes-192-cbc' : 'aes-128-cbc');
+                const dec = crypto.createDecipheriv(algo, keyBuf, ivBuf || Buffer.alloc(16));
+                return Buffer.concat([dec.update(dataBuf), dec.final()]);
+            } catch (e) {
+                return Buffer.alloc(0);
+            }
+        };
+        return cipher;
+    }
+};
+
+globalThis.javaImport.SecretKeySpec = globalThis.SecretKeySpec;
+globalThis.javaImport.IvParameterSpec = globalThis.IvParameterSpec;
+globalThis.javaImport.Base64 = globalThis.Base64;
+globalThis.javaImport.Cipher = globalThis.Cipher;
+globalThis.Arrays = {
+    copyOfRange: function(src, from, to) {
+        const arr = __byteArrayOf(src);
+        return Buffer.from(arr.slice(from, to));
+    }
+};
+globalThis.javaImport.Arrays = globalThis.Arrays;
 
 // Result extraction is handled inline in runner.rs

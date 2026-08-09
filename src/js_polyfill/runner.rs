@@ -1168,4 +1168,136 @@ url + "/search," + JSON.stringify({ "body": "_token=" + token + "&keyword=key", 
         let out = execute_js_batch_async(&jobs, &client, &[]).await;
         assert_eq!(out[0].as_deref(), Some("/go/to/results"));
     }
+
+    #[tokio::test]
+    async fn test_rule_batch_desede_cipher_polyfill() {
+        // Legado sources decrypt paginated content with the classic Java API
+        // (SecretKeySpec / IvParameterSpec / Base64 / Cipher). The polyfill must
+        // let such a rule actually decrypt the body fetched via java.ajax.
+        if Command::new("node")
+            .arg("-e")
+            .arg("console.log(1)")
+            .output()
+            .is_err()
+        {
+            eprintln!("node not available; skipping DESede cipher test");
+            return;
+        }
+        // Ciphertext of "第一章 风起 夜风卷起落叶…" under key ZKYm5vSUhvcG9IbXNZTG1pb2 / iv 01234567.
+        let ciphertext = "riG5B3O77ilQm0WI4sF8a7lRx1s4NSKnlXiQOTKBG0nQR9dekwZ5idofSkItQf9ypZKC2ONiewgCQc8EegkimTyEINFsvSpijoD2RlojNrRf/AN16T0tuQ==";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!("{{\"data\":\"{}\"}}", ciphertext);
+        let body_clone = body.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body_clone.len(),
+                body_clone
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        });
+
+        let client = HttpClient::new(10).unwrap();
+        let jobs = vec![JsRuleJob {
+            id: 0,
+            base_url: format!("http://{}", addr),
+            result: "".into(),
+            js_code: r#"result = java.ajax('/api');
+var data = JSON.parse(result).data;
+var key = SecretKeySpec(String("ZKYm5vSUhvcG9IbXNZTG1pb2").getBytes(), "DESede");
+var iv = IvParameterSpec(String("01234567").getBytes());
+var bytes = Base64.decode(String(data).getBytes(), 2);
+var chipher = Cipher.getInstance("DESede/CBC/PKCS5Padding");
+chipher.init(2, key, iv);
+content = String(chipher.doFinal(bytes));"#
+                .into(),
+        }];
+        let out = execute_rule_batch_async(&jobs, &client, &[]).await;
+        let content = out[0].content.as_deref().unwrap_or("");
+        assert!(
+            content.contains("第一章 风起"),
+            "expected decrypted text, got {:?}",
+            content
+        );
+        assert!(content.contains("夜风卷起落叶"), "got {:?}", content);
+    }
+
+    #[tokio::test]
+    async fn test_rule_batch_aes_cipher_polyfill() {
+        // 七猫-style: AES/CBC, iv embedded as the first 16 bytes of the payload,
+        // ciphertext is the remainder. Uses Arrays.copyOfRange like the real rules.
+        if Command::new("node")
+            .arg("-e")
+            .arg("console.log(1)")
+            .output()
+            .is_err()
+        {
+            eprintln!("node not available; skipping AES cipher test");
+            return;
+        }
+        let plaintext = "夜色渐深，城墙上火把依次亮起";
+        // Pre-compute the ciphertext at test time via `node -e` (mirrors the
+        // 七猫 payload layout: 16-byte iv followed by the AES-CBC ciphertext).
+        let script = format!(
+            r#"const c=require('crypto');
+const key=Buffer.from('242ccb8230d709e1','utf8');
+const iv=Buffer.from('000102030405060708090a0b0c0d0e0f','hex');
+const ci=c.createCipheriv('aes-128-cbc',key,iv);
+let e=ci.update({:?},'utf8','base64');e+=ci.final('base64');
+const payload=Buffer.concat([iv,Buffer.from(e,'base64')]).toString('base64');
+console.log(payload);"#,
+            plaintext
+        );
+        let out = std::process::Command::new("node")
+            .arg("-e")
+            .arg(&script)
+            .output();
+        let payload = String::from_utf8_lossy(&out.unwrap().stdout).trim().to_string();
+        assert!(!payload.is_empty(), "failed to pre-compute payload");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!("{{\"data\":\"{}\"}}", payload);
+        let body_clone = body.clone();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body_clone.len(),
+                body_clone
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+        });
+
+        let client = HttpClient::new(10).unwrap();
+        let jobs = vec![JsRuleJob {
+            id: 0,
+            base_url: format!("http://{}", addr),
+            result: "".into(),
+            js_code: r#"result = java.ajax('/api');
+content = JSON.parse(result).data;
+var ivEncData = java.base64DecodeToByteArray(content);
+var key = SecretKeySpec(String("242ccb8230d709e1").getBytes(), "AES");
+var iv = IvParameterSpec(Arrays.copyOfRange(ivEncData, 0, 16));
+var chipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+chipher.init(2, key, iv);
+content = String(chipher.doFinal(Arrays.copyOfRange(ivEncData, 16, ivEncData.length)));"#
+                .into(),
+        }];
+        let out = execute_rule_batch_async(&jobs, &client, &[]).await;
+        let content = out[0].content.as_deref().unwrap_or("");
+        assert!(
+            content.contains("夜色渐深"),
+            "expected decrypted AES text, got {:?}",
+            content
+        );
+    }
 }
