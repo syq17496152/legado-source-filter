@@ -968,12 +968,10 @@ url + "/search," + JSON.stringify({ "body": "_token=" + token + "&keyword=key", 
         let out = execute_rule_batch_async(&jobs, &client, &[]).await;
         assert_eq!(
             out[0].content.as_deref(),
-            Some(
-                format!(
-                    "http://{}/search,{{\"body\":\"_token=TOK123&keyword=key\",\"method\":\"post\"}}",
-                    addr
-                )
-            )
+            Some(format!(
+                "http://{}/search,{{\"body\":\"_token=TOK123&keyword=key\",\"method\":\"post\"}}",
+                addr
+            ))
             .as_deref()
         );
     }
@@ -1257,7 +1255,9 @@ console.log(payload);"#,
             .arg("-e")
             .arg(&script)
             .output();
-        let payload = String::from_utf8_lossy(&out.unwrap().stdout).trim().to_string();
+        let payload = String::from_utf8_lossy(&out.unwrap().stdout)
+            .trim()
+            .to_string();
         assert!(!payload.is_empty(), "failed to pre-compute payload");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

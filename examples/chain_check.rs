@@ -83,7 +83,17 @@ async fn run(filter: Option<String>) -> anyhow::Result<()> {
                     "html"
                 };
                 if let Some(ref rule) = s.ruleSearch {
-                    let results = rule_dsl::extract_results(&res.body_text, ct, rule);
+                    let results = if legado_source_filter::content_check::rule_has_js(rule) {
+                        legado_source_filter::content_check::extract_results_js(
+                            &client,
+                            s,
+                            &res,
+                            &s.bookSourceUrl,
+                        )
+                        .await
+                    } else {
+                        rule_dsl::extract_results(&res.body_text, ct, rule)
+                    };
                     if rule_dsl::has_valid_results(&results) {
                         book_url = results
                             .first()

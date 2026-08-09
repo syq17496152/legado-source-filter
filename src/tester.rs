@@ -290,45 +290,55 @@ pub async fn run(
                     continue;
                 }
 
-                // Apply ruleSearch to extract results
+                // Apply ruleSearch to extract results. When the rule contains
+                // JS (`<js>`/`@js:`/`java.`), transform the response body via the
+                // JS polyfill first (many sources decrypt the payload), then
+                // apply the remaining DSL rules on the transformed text.
+                let mut results: Vec<Vec<String>> = Vec::new();
                 if let Some(ref rule) = source.ruleSearch {
-                    let results = rule_dsl::extract_results(&result.body_text, &content_type, rule);
-
-                    if rule_dsl::has_valid_results(&results) {
-                        // Optional secondary check: walk the full reading chain
-                        // (book info → toc → first chapter content) and confirm
-                        // ruleContent yields real readable text.
-                        if config.verify_content
-                            && let Some(fail) =
-                                verify_reading_chain(&client, &source, &results, &base_url).await
-                        {
-                            info!(
-                                "{}: search ok but content unverified: {}",
-                                source.bookSourceName, fail
-                            );
-                            content_failed = Some(fail);
-                            continue;
-                        }
-
-                        info!(
-                            "{}: PASSED (keyword: {}, {} items, {}ms)",
-                            source.bookSourceName,
-                            keyword,
-                            results.len(),
-                            result.elapsed_ms
-                        );
-                        if let Err(e) = cache.save(
-                            &source.bookSourceUrl,
-                            &source.bookSourceName,
-                            "passed",
-                            None,
-                            1,
-                        ) {
-                            warn!("cache save failed for {}: {}", source.bookSourceName, e);
-                        }
-                        passed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return;
+                    if crate::content_check::rule_has_js(rule) {
+                        results =
+                            crate::content_check::extract_results_js(&client, &source, &result, &base_url)
+                                .await;
+                    } else {
+                        results = rule_dsl::extract_results(&result.body_text, &content_type, rule);
                     }
+                }
+
+                if rule_dsl::has_valid_results(&results) {
+                    // Optional secondary check: walk the full reading chain
+                    // (book info → toc → first chapter content) and confirm
+                    // ruleContent yields real readable text.
+                    if config.verify_content
+                        && let Some(fail) =
+                            verify_reading_chain(&client, &source, &results, &base_url).await
+                    {
+                        info!(
+                            "{}: search ok but content unverified: {}",
+                            source.bookSourceName, fail
+                        );
+                        content_failed = Some(fail);
+                        continue;
+                    }
+
+                    info!(
+                        "{}: PASSED (keyword: {}, {} items, {}ms)",
+                        source.bookSourceName,
+                        keyword,
+                        results.len(),
+                        result.elapsed_ms
+                    );
+                    if let Err(e) = cache.save(
+                        &source.bookSourceUrl,
+                        &source.bookSourceName,
+                        "passed",
+                        None,
+                        1,
+                    ) {
+                        warn!("cache save failed for {}: {}", source.bookSourceName, e);
+                    }
+                    passed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return;
                 }
             }
 

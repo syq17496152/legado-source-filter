@@ -6,7 +6,7 @@
 
 ```bash
 cargo build                              # 编译
-cargo test                               # 全部测试（33 个）
+cargo test                               # 全部测试（79 单测 + 6 集成）
 cargo test --test integration            # 集成测试
 cargo run -- full --rounds 5             # 一键下载+预检+5轮测试（~5-15 分钟）
 cargo run -- full --limit 10 --rounds 3  # 快速测试前 10 个
@@ -45,8 +45,22 @@ cargo run -- --json full --limit 5       # 一键运行+JSON 输出（AI 友好�
 - `--no-verify-content` 或 `--verify-content=false` 回退到仅搜索验证
 - 后几轮只重试瞬时原因（network_error / *_fetch / rate_limited），确定性失败跳过
 
+### JS 搜索结果提取（ruleSearch 含 JS）
+
+约 73 个源的 `ruleSearch.bookList` 含 `<js>`（解密/变换 payload），另有大量源的
+`bookUrl`/`name` 等字段是 `<js>`/`@js:`。tester 和 `chain_check` 现在通过
+`content_check::extract_results_js` 处理：
+
+- 先对 `<js>...</js>` bookList 段用 `execute_rule_batch_async` 求值，得到变换后的
+  文本（常是解密后的 JSON/HTML），再用 `</js>` 后剩余 DSL 规则提取每项
+- **字段级 JS**：`bookUrl`/`name`/`coverUrl` 若含 `<js>`/`@js:`，对每个 item 的
+  内容（`result`）单独求值（如 `java.getString('$.book_id')` 生成详情 URL）
+- **`{{$.a||$.b}}` 模板回退**：`apply_field_extract` 用 `expand_template` 展开
+  双花括号占位符，`||` 分段取第一个非空 JSONPath 值（如长佩文学 bookUrl）
+- `extract_items` 会把 bookList 提取出的整个 JSON 数组展开为逐元素 item
+
 调试工具：
-- `cargo run --example chain_check` — 对真实源跑完整链路并打印每环结论
+- `cargo run --example chain_check` — 对真实源跑完整链路并打印每环结论（搜索提取同样走 JS 预处理）
 - `cargo run --example ajax_bridge_check` — 专门扫描 ruleContent 含 java.ajax 的源并跑链路
 - `cargo run --example ajax_live_check` — 对真实公网 API 验证 java.ajax 桥
 
@@ -110,7 +124,8 @@ src/
 ├── search_url.rs    — 从 searchUrl 构造 HTTP 请求（{{key}}、POST、JS L1）
 ├── http_client.rs   — reqwest 封装（chardetng 编码探测 + encoding_rs 转码）
 ├── tester.rs        — 异步测试调度（tokio Semaphore + 抖动重试）
-├── content_check.rs — 完整阅读链路验证（搜索→详情→目录→正文）
+├── content_check.rs — 完整阅读链路验证（搜索→详情→目录→正文）+ JS 搜索结果提取
+│                     （extract_results_js / rule_has_js / expand_template / extract_items）
 ├── reporter.rs      — JSON 报告输出
 ├── db.rs            — SQLite 缓存层（单连接 Mutex + WAL，断点续测）
 ├── rule_dsl/        — Legado 自定义规则 DSL 解析器
