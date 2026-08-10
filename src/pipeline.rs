@@ -279,8 +279,10 @@ pub fn remove_stale_outputs(output_dir: &Path) {
 }
 
 /// Analyze cache after a round: if every tested source on a domain has "failed"
-/// (none passed), mark all its failed sources as "dead_domain" so subsequent
-/// rounds skip them — retrying a dead site is wasted effort.
+/// (none passed), mark its *deterministically* failed sources as "dead_domain"
+/// so subsequent rounds skip them — retrying a dead site is wasted effort.
+/// Transient failures (`network_error`, `*_fetch`, `rate_limited`, ...) are
+/// left as `failed` so later rounds still retry them.
 fn mark_dead_domains(eligible: &[types::BookSource], cache: &db::TestCache) {
     let mut domain_has_passed = std::collections::HashSet::new();
 
@@ -303,7 +305,7 @@ fn mark_dead_domains(eligible: &[types::BookSource], cache: &db::TestCache) {
         }
     }
 
-    // Second pass: mark failed sources on dead domains
+    // Second pass: mark deterministically failed sources on dead domains
     for src in eligible {
         let domain = src
             .bookSourceUrl
@@ -319,7 +321,9 @@ fn mark_dead_domains(eligible: &[types::BookSource], cache: &db::TestCache) {
         else {
             continue;
         };
-        if status == "failed"
+        let is_deterministic = status == "failed"
+            && reason.as_deref().is_some_and(|r| !is_transient_reason(r));
+        if is_deterministic
             && let Err(e) = cache.save(
                 &src.bookSourceUrl,
                 &src.bookSourceName,
@@ -454,8 +458,11 @@ mod tests {
         let (st1, _) = cache.check("https://dead.com", "D1").unwrap().unwrap();
         let (st2, _) = cache.check("https://dead.com", "D2").unwrap().unwrap();
         let (st_a2, _) = cache.check("https://alive.com", "A2").unwrap().unwrap();
-        assert_eq!(st1, "dead_domain");
-        assert_eq!(st2, "dead_domain");
+        assert_eq!(st1, "dead_domain", "deterministic failure on dead domain");
+        assert_eq!(
+            st2, "failed",
+            "transient failure stays failed so later rounds retry it"
+        );
         assert_eq!(
             st_a2, "failed",
             "domain with a passed source stays failed, not dead"
