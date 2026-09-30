@@ -79,9 +79,10 @@ pub fn extract_toc(
 
 /// Apply a single rule string (e.g. `ruleContent.content`) against content.
 /// Used for one-shot extractions that don't need a full SearchRule.
+/// `extract()` already applies segment fallback and `##` replacements.
 pub fn extract_single(content: &str, content_type: &str, rule: &str) -> Vec<String> {
     let tokens = parser::tokenize(rule);
-    let extracted = if content_type.contains("json") {
+    if content_type.contains("json") {
         if let Ok(json) = serde_json::from_str(content) {
             json_extractor::extract(&json, &tokens)
         } else {
@@ -89,8 +90,7 @@ pub fn extract_single(content: &str, content_type: &str, rule: &str) -> Vec<Stri
         }
     } else {
         html_extractor::extract(content, &tokens)
-    };
-    combinator::apply_combinators(extracted, &tokens)
+    }
 }
 
 /// Check if search results contain valid data (non-empty name or author).
@@ -119,7 +119,8 @@ fn apply_extract(
     match rule {
         Some(r) if !r.is_empty() => {
             let tokens = parser::tokenize(r);
-            let results = if content_type.contains("json") {
+            // extract() handles segment fallback and ## replacements.
+            if content_type.contains("json") {
                 if let Ok(json) = serde_json::from_str(content) {
                     json_extractor::extract(&json, &tokens)
                 } else {
@@ -127,9 +128,7 @@ fn apply_extract(
                 }
             } else {
                 html_extractor::extract(content, &tokens)
-            };
-            // Apply combinator tokens (||, ##, !0) to the extracted results
-            combinator::apply_combinators(results, &tokens)
+            }
         }
         _ => Vec::new(),
     }

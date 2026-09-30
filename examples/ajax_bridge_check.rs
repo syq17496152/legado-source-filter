@@ -34,8 +34,8 @@ async fn run() -> anyhow::Result<()> {
         }
         // Run the full chain for this source
         let mut book_url = None;
-        if let Some(spec) = search_url::build_request(s, "重生") {
-            if let Ok(res) = client.fetch(&spec).await {
+        if let Some(spec) = search_url::build_request(s, "重生")
+            && let Ok(res) = client.fetch(&spec).await {
                 let ct = if res.content_type.contains("json") {
                     "json"
                 } else {
@@ -53,13 +53,12 @@ async fn run() -> anyhow::Result<()> {
                     }
                 }
             }
-        }
         let Some(bu) = book_url else {
             println!("{}: search produced no bookUrl", s.bookSourceName);
             continue;
         };
         let resolved = search_url::resolve_url(&bu, &s.bookSourceUrl);
-        let verdict = verify_chain(&client, s, &resolved, &s.bookSourceUrl).await;
+        let verdict = verify_chain(&client, s, &resolved, &s.bookSourceUrl, None).await;
         println!(
             "{}: {} at {} ({}) len={}",
             s.bookSourceName,

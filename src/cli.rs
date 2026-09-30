@@ -43,6 +43,11 @@ pub enum Commands {
         #[arg(long)]
         limit: Option<usize>,
 
+        /// Randomly sample N eligible sources instead of the first N —
+        /// representative quick tests across the whole pool
+        #[arg(long, conflicts_with = "limit")]
+        sample: Option<usize>,
+
         /// Path to config.toml (optional; built-in defaults used if not specified)
         #[arg(long)]
         config: Option<PathBuf>,

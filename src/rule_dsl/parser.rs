@@ -22,8 +22,11 @@ pub enum RuleToken {
     JsBlock(String),
 
     // ── Modifiers ──
-    /// `.n` → take index n
+    /// `.n` → take index n (0-based)
     Index(usize),
+    /// `!n` → EXCLUDE index n (Legado exclusion modifier). `.n` and `!n` are
+    /// distinct semantics and must not be conflated.
+    ExcludeIndex(usize),
 
     // ── Extractors ──
     /// `@text`
@@ -163,15 +166,15 @@ fn tokenize_at_chain(s: &str) -> Vec<RuleToken> {
             // First part: locator (may include index)
             let (loc, idx) = split_index(p);
             tokens.push(parse_locator(loc));
-            if let Some(n) = idx {
-                tokens.push(RuleToken::Index(n));
+            if let Some(spec) = idx {
+                tokens.push(index_token(spec));
             }
         } else {
             // @-prefixed part
             let (annot, idx) = split_index(p);
             tokens.push(parse_annotation(annot));
-            if let Some(n) = idx {
-                tokens.push(RuleToken::Index(n));
+            if let Some(spec) = idx {
+                tokens.push(index_token(spec));
             }
         }
     }
@@ -179,8 +182,28 @@ fn tokenize_at_chain(s: &str) -> Vec<RuleToken> {
     tokens
 }
 
-/// Split a name like "item.0" into ("item", Some(0)).
-fn split_index(s: &str) -> (&str, Option<usize>) {
+/// Convert a parsed index suffix into the matching token: `.n` → take,
+/// `!n` → exclude.
+fn index_token(spec: IndexSpec) -> RuleToken {
+    if spec.exclude {
+        RuleToken::ExcludeIndex(spec.n)
+    } else {
+        RuleToken::Index(spec.n)
+    }
+}
+
+/// Index modifier parsed from a `.n` / `!n` suffix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexSpec {
+    pub n: usize,
+    /// `!n` excludes, `.n` takes.
+    pub exclude: bool,
+}
+
+/// Split a name like "item.0" into ("item", Some(IndexSpec { n: 0, exclude: false }))
+/// or "item!0" into ("item", Some(IndexSpec { n: 0, exclude: true })).
+/// Negative indices (`-1`, `!-1`) are NOT parsed (documented gap vs Legado).
+pub fn split_index(s: &str) -> (&str, Option<IndexSpec>) {
     let bytes = s.as_bytes();
     let len = bytes.len();
 
@@ -200,7 +223,9 @@ fn split_index(s: &str) -> (&str, Option<usize>) {
         && (bytes[digit_end - 1] == b'.' || bytes[digit_end - 1] == b'!')
         && let Ok(num) = s[digit_end..].parse::<usize>()
     {
-        return (&s[..digit_end - 1], Some(num));
+        let exclude = bytes[digit_end - 1] == b'!';
+        let spec = IndexSpec { n: num, exclude };
+        return (&s[..digit_end - 1], Some(spec));
     }
     (s, None)
 }
@@ -217,8 +242,16 @@ fn parse_locator(s: &str) -> RuleToken {
     } else if let Some(rest) = s.strip_prefix("data.") {
         let path: Vec<String> = rest.split('.').map(|x| x.to_string()).collect();
         RuleToken::DataPath(path)
-    } else {
+    } else if s == "." {
+        // "." is the "match everything" rule — keep the whole-content
+        // fallback semantics of the HTML extractor.
         RuleToken::Unknown(s.to_string())
+    } else {
+        // A bare token like `a`, `li`, `div` is a CSS tag selector in Legado.
+        // Previously parsed as Unknown, which the HTML extractor ignored and
+        // fell back to the whole page — so `a@href` style field rules silently
+        // extracted garbage. Map bare tokens to TagName so real extraction works.
+        RuleToken::TagName(s.to_string())
     }
 }
 
@@ -251,15 +284,33 @@ fn parse_annotation(s: &str) -> RuleToken {
     }
 }
 
+/// Split a token stream at `Fallback` boundaries. Each segment is one `||`
+/// alternative, evaluated independently against the ORIGINAL content; the
+/// first segment with a non-empty result wins (Legado fallback semantics).
+pub fn split_segments(tokens: &[RuleToken]) -> Vec<&[RuleToken]> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (i, t) in tokens.iter().enumerate() {
+        if matches!(t, RuleToken::Fallback) {
+            segments.push(&tokens[start..i]);
+            start = i + 1;
+        }
+    }
+    segments.push(&tokens[start..]);
+    segments
+}
+
 // ── Public convenience ──
 
 pub fn parse_rule(rule: &str) -> Vec<RuleToken> {
     tokenize(rule)
 }
 
+/// Split a base name from an index suffix, if any. Kept for callers that only
+/// need the raw numbers (no take/exclude distinction).
 pub fn extract_index(s: &str) -> Option<(String, usize)> {
     let (base, idx) = split_index(s);
-    idx.map(|n| (base.to_string(), n))
+    idx.map(|spec| (base.to_string(), spec.n))
 }
 
 #[cfg(test)]
@@ -311,10 +362,35 @@ mod tests {
 
     #[test]
     fn test_split_index() {
-        assert_eq!(split_index("item.0"), ("item", Some(0)));
-        assert_eq!(split_index("item!0"), ("item", Some(0)));
-        assert_eq!(split_index("item.12"), ("item", Some(12)));
+        assert_eq!(
+            split_index("item.0"),
+            ("item", Some(IndexSpec { n: 0, exclude: false }))
+        );
+        assert_eq!(
+            split_index("item!0"),
+            ("item", Some(IndexSpec { n: 0, exclude: true }))
+        );
+        assert_eq!(
+            split_index("item.12"),
+            ("item", Some(IndexSpec { n: 12, exclude: false }))
+        );
         assert_eq!(split_index("item"), ("item", None));
+    }
+
+    #[test]
+    fn test_index_vs_exclude_token() {
+        let t = tokenize("class.a.0@text");
+        assert!(t.contains(&RuleToken::Index(0)));
+        assert!(!t.contains(&RuleToken::ExcludeIndex(0)));
+
+        let t = tokenize("class.a!0@text");
+        assert!(t.contains(&RuleToken::ExcludeIndex(0)));
+        assert!(!t.contains(&RuleToken::Index(0)));
+
+        // Bare tag + take index (real-world `a.1` field rules).
+        let t = tokenize("a.1@href");
+        assert_eq!(t[0], RuleToken::TagName("a".into()));
+        assert_eq!(t[1], RuleToken::Index(1));
     }
 
     #[test]
@@ -323,5 +399,30 @@ mod tests {
         assert_eq!(parse_annotation("textNodes"), RuleToken::TextNodes);
         assert_eq!(parse_annotation("href"), RuleToken::Href);
         assert_eq!(parse_annotation("a"), RuleToken::TagShort("a".into()));
+    }
+
+    #[test]
+    fn test_bare_token_is_tag_name() {
+        // `a@href` — the bare `a` must be a tag selector, not Unknown, so
+        // field rules like `a@href` extract real anchors.
+        let t = tokenize("a@href");
+        assert_eq!(t[0], RuleToken::TagName("a".into()));
+        assert_eq!(t[1], RuleToken::Href);
+
+        let t = tokenize("li.0@text");
+        assert_eq!(t[0], RuleToken::TagName("li".into()));
+        assert_eq!(t[1], RuleToken::Index(0));
+
+        // A CSS descendant selector stays a single tag token.
+        let t = tokenize("h2 a@href");
+        assert_eq!(t[0], RuleToken::TagName("h2 a".into()));
+    }
+
+    #[test]
+    fn test_dot_is_match_everything() {
+        // "." is the whole-page fallback rule — must stay Unknown so the HTML
+        // extractor keeps its historical "return the whole content" behaviour.
+        let t = tokenize(".");
+        assert_eq!(t, vec![RuleToken::Unknown(".".into())]);
     }
 }

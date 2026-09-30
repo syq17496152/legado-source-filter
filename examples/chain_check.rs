@@ -75,8 +75,8 @@ async fn run(filter: Option<String>) -> anyhow::Result<()> {
             if std::env::var("CHAIN_DEBUG").is_ok() {
                 println!("  [js-search] {}", book_url.as_deref().unwrap_or("<none>"));
             }
-        } else if let Some(spec) = search_url::build_request(s, "重生") {
-            if let Ok(res) = client.fetch(&spec).await {
+        } else if let Some(spec) = search_url::build_request(s, "重生")
+            && let Ok(res) = client.fetch(&spec).await {
                 let ct = if res.content_type.contains("json") {
                     "json"
                 } else {
@@ -104,13 +104,12 @@ async fn run(filter: Option<String>) -> anyhow::Result<()> {
                     }
                 }
             }
-        }
         let Some(bu) = book_url else {
             println!("{}: search produced no bookUrl", s.bookSourceName);
             continue;
         };
         let resolved = search_url::resolve_url(&bu, &s.bookSourceUrl);
-        let verdict = verify_chain(&client, s, &resolved, &s.bookSourceUrl).await;
+        let verdict = verify_chain(&client, s, &resolved, &s.bookSourceUrl, None).await;
         println!(
             "{}: {} at {} ({}) len={}",
             s.bookSourceName,

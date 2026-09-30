@@ -17,11 +17,19 @@ pub fn write_outputs(
     cache.save_meta("eligible", &eligible_json)?;
     cache.save_meta("eligible_count", &output.eligible.len().to_string())?;
 
-    // ── explore_only.json ──
-    if !output.explore_only.is_empty() {
-        let explore_path = output_dir.join("explore_only.json");
-        let explore_json = serde_json::to_string_pretty(&output.explore_only)?;
-        fs::write(&explore_path, &explore_json)?;
+    // ── explore_only.json (deduplicated — the dataset repeats entries) ──
+    {
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&BookSource> = output
+            .explore_only
+            .iter()
+            .filter(|s| seen.insert((s.bookSourceUrl.clone(), s.bookSourceName.clone())))
+            .collect();
+        if !unique.is_empty() {
+            let explore_path = output_dir.join("explore_only.json");
+            let explore_json = serde_json::to_string_pretty(&unique)?;
+            fs::write(&explore_path, &explore_json)?;
+        }
     }
 
     // ── report → DB ──

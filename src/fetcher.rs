@@ -10,6 +10,8 @@ pub fn clear_output_cache(output_dir: &Path) {
         "test_cache.db-wal",
         "test_cache.db-shm",
         "filtered.json",
+        "unverified.json",
+        "static.json",
     ] {
         let path = output_dir.join(entry);
         if path.exists() {

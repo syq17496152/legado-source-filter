@@ -6,10 +6,11 @@
 
 ```bash
 cargo build                              # 编译
-cargo test                               # 全部测试（79 单测 + 6 集成）
+cargo test                               # 全部测试（110 单测 + 22 DSL 差分 + 6 集成）
 cargo test --test integration            # 集成测试
 cargo run -- full --rounds 5             # 一键下载+预检+5轮测试（~5-15 分钟）
 cargo run -- full --limit 10 --rounds 3  # 快速测试前 10 个
+cargo run -- full --sample 10 --rounds 3 # 随机抽样 10 个（代表性测试，与 --limit 互斥）
 cargo run -- --json status               # 查看管道进度（JSON 格式）
 cargo run -- status                      # 查看管道进度（人类可读）
 cargo run -- --json full --limit 5       # 一键运行+JSON 输出（AI 友好）
@@ -30,6 +31,24 @@ cargo run -- --json full --limit 5       # 一键运行+JSON 输出（AI 友好�
 ```
 
 - 实现：`src/content_check.rs`，任一环节失败即 `failed` 并记录具体 stage
+- **张冠李戴一致性校验**：`verify_chain` 拿到搜索结果的书名后，从详情页
+  `ruleBookInfo.name` 提取实际书名做相似度比对（包含关系或 ≥50% bigram 重合），
+  完全不匹配判 `mismatch` —— 链路"能走通"但读的是另一本书的源不再误判 passed
+- **static 探测**：链路验证通过后用配置的"冷门"关键词（`[test] static_probe_keywords`，
+  默认 `zzzzz`）再搜一次；结果与主关键词 Jaccard 重合 ≥90% 说明搜索写死。
+  命中源仍保留 `passed`（链路确实可读），但证据里标 `static_probe: true` 并写入
+  `output/static.json` 供人工复核
+- **证据记录**：每次终态判定把 `keywords_tried` / `chains_ok` / `verified_keyword` /
+  `book_name` / `content_len` / `static_probe` 写入 `test_results.evidence`（JSON 列），
+  并追加 `test_history` 表（历史状态序列）。`cache_ttl_days`（默认 0=关）可让
+  passed 源超期自动重测
+- **per-domain 限速**：尊重书源声明的 `concurrentRate`（毫秒字符串 `"1000"` 或
+  `{"rate","interval","timeUnit"}` 对象），同域取最保守间隔，`HttpClient.fetch`
+  按域名串行限速（`with_rate_limits`）；未声明域名不受影响
+- **Legado 语义差分测试**：`tests/dsl_diff.rs` 以官方规则语义为基准，用真实书源
+  规则模式 + fixture 锁定提取行为（定位器/位置索引 `!n` 排除/提取器/`||` 回退/
+  `##` 替换/JSONPath/类型不匹配短路），已知差距（负索引、区间、`&&`、children、
+  ownText/all）在 `known_gaps` 文档化
 - JS 规则（`@js:`/`<js>`）在 `ruleToc`/`ruleContent`/`ruleBookInfo.tocUrl` 中通过
   `src/js_polyfill/runner.rs::execute_rule_batch_async` 求值（node 批量）
 - **java.ajax / java.post 交互桥**：`ruleContent`/`ruleToc`/`@js:` 搜索 URL 里的
@@ -115,12 +134,17 @@ src/
 ├── lib.rs           — 库导出，供集成测试使用
 ├── cli.rs           — clap 参数定义 + --json 事件输出
 ├── paths.rs         — 输入/输出路径解析（CWD 优先，XDG 兜底）
-├── config.rs        — config.toml 加载 + TestConfig 构造
+├── config.rs        — config.toml 加载 + TestConfig 构造（[[search]] 支持 domain 域名命中、
+│                      [test] generic_keywords 可配置）
 ├── fetcher.rs       — 书源下载（aoaostar 索引发现 + 原子替换）
 ├── pipeline.rs      — 多轮测试编排、dead_domain 标记、汇总、输出
 ├── types.rs         — BookSource、规则结构体、枚举
+├── status.rs        — 强类型状态模型：TestStatus（passed/failed/dead_domain/js_api/
+│                      skipped/unverified）+ FailReason（含 is_transient 分类），
+│                      DB 字符串兼容（历史缓存可直接读）
 ├── preflight.rs     — 5 步预检分类管道
-├── url_fixer.rs     — 自动修复残缺 bookSourceUrl
+├── url_fixer.rs     — 自动修复残缺 bookSourceUrl + normalized_domain/domain_matches
+│                      （url crate 归一化，www. 剥离；dead_domain 按域聚合）
 ├── search_url.rs    — 从 searchUrl 构造 HTTP 请求（{{key}}、POST、JS L1）
 ├── http_client.rs   — reqwest 封装（chardetng 编码探测 + encoding_rs 转码）
 ├── tester.rs        — 异步测试调度（tokio Semaphore + 抖动重试）
@@ -129,10 +153,13 @@ src/
 ├── reporter.rs      — JSON 报告输出
 ├── db.rs            — SQLite 缓存层（单连接 Mutex + WAL，断点续测）
 ├── rule_dsl/        — Legado 自定义规则 DSL 解析器
-│   ├── parser.rs         — 词法分析器
-│   ├── html_extractor.rs — HTML 规则求值（scraper）
-│   ├── json_extractor.rs — JSONPath 求值
-│   └── combinator.rs     — || 回退、## 正则替换、!0 索引
+│   ├── parser.rs         — 词法分析器（裸字母 token → TagName 选择器；"." 保留整页兜底；
+│   │                       `.n` 取 / `!n` 排除拆分为 Index / ExcludeIndex；split_segments 分段）
+│   ├── html_extractor.rs — HTML 规则求值（scraper；JSONPath 等类型不匹配规则返回空；
+│   │                       extract 按 `||` 分段回退 + 段内 `##`；textNodes/@html 取直接
+│   │                       子节点而非 html 包装层）
+│   ├── json_extractor.rs — JSONPath 求值（同样按 `||` 分段回退）
+│   └── combinator.rs     — `##` 正则替换（按段应用；Index 由 extractor 消费，不再二次处理）
 └── js_polyfill/     — JS 规则求值引擎（searchUrl + ruleToc/ruleContent）
     ├── polyfill.js       — 模拟 java.* API（getString/getElements/加解密，node crypto；
     │                       java.ajax/post 经 stdin/stdout 桥回调 Rust 侧真实 HTTP）
@@ -147,6 +174,12 @@ src/
 - 文字+启用：3680 → 预检 → 2957 个待测（683 跳过、46 仅发现）
 - searchUrl 类型：2785 模板 + 129 @js + 21 `<js>` + 22 纯 URL
 - 输出：`output/filtered.json`（约 640 个可用源，导入 Legado） + `output/explore_only.json`
+  + `output/unverified.json`（搜索无 bookUrl，链路不可验证）+ `output/static.json`
+  （搜索疑似写死的 passed 源，供人工复核）
+- `passed` 语义：搜索有结果且**能提取到书籍 URL 并走通阅读链路**才算 passed；
+  搜索结果无 bookUrl 的源记为 `unverified`（写 `output/unverified.json`，不入 filtered）。
+- 测试状态为强类型（`status.rs`），DB 存字符串兼容旧缓存；`reason` 的瞬时性判定
+  （`is_transient`）决定后续轮次是否重试。
 
 ## CLI 参数
 
@@ -157,6 +190,7 @@ src/
 | `--json` | 全局 flag，输出 JSON Lines 到 stdout（AI 友好） |
 | `--force` | 忽略缓存，全部重新测试 |
 | `--limit N` | 只测前 N 个源 |
+| `--sample N` | 随机抽样 N 个源（全池代表性测试，与 `--limit` 互斥） |
 | `--rounds N` | 测试轮数，失败源每轮重试（默认 1） |
 | `--concurrency N` | 并发数，默认 50 |
 | `--verify-content` | 完整阅读链路验证（默认开启）；`--verify-content=false` 或 `--no-verify-content` 关闭 |

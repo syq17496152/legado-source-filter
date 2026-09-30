@@ -25,6 +25,9 @@ cargo run -- full --rounds 5
 # 快速测试前 10 个源
 cargo run -- full --limit 10 --rounds 3
 
+# 随机抽样 10 个源（全池代表性测试，与 --limit 互斥）
+cargo run -- full --sample 10 --rounds 3
+
 # 强制从头重测（清除缓存；默认会断点续测，已测源自动跳过）
 cargo run -- full --force --rounds 5
 ```
@@ -45,6 +48,7 @@ cargo run -- status
 | `-t`, `--timeout N` | full | 单请求超时（秒），默认 15 |
 | `--rounds N` | full | 测试轮数，失败源每轮重试，默认 1 |
 | `--limit N` | full | 只测前 N 个源 |
+| `--sample N` | full | 随机抽样 N 个源（全池代表性测试，与 `--limit` 互斥） |
 | `--force` | full | 清除缓存，全部从头重新测试；默认保留缓存断点续测 |
 | `--config PATH` | full | 指定 config.toml 路径（可选） |
 | `--verify-content[=false]` | full | 完整阅读链路验证（默认开启）；传 `=false` 关闭 |
@@ -103,7 +107,20 @@ author = "铁马飞桥"
 # 七猫免费小说 - 310万在读，玄幻顶流
 ```
 
-每个 `[[search]]` 条目指定一本书名和作者，测试时会被优先用作搜索关键词，覆盖通用的默认关键词。`#` 为注释行，仅用于说明，不影响运行。
+每个 `[[search]]` 条目指定一本书名和作者，测试时会被优先用作搜索关键词，覆盖通用的默认关键词。`domain` 字段（可选）标注该书所在站点域名，命中该域名的书源会优先用这本书测试（如 `domain = "qidian.com"` 会匹配 `www.qidian.com`、`m.qidian.com`）。`#` 为注释行，仅用于说明，不影响运行。
+
+`[test]` 段可配置通用回退关键词及其他测试参数：
+
+```toml
+[test]
+generic_keywords = ["重生", "系统", "穿越"]
+# static 探测关键词：链路通过后，用这个"冷门"词再搜一次；结果与主关键词
+# 几乎完全重合说明搜索可能写死（永远返回同一页）。命中源保留 passed，
+# 但会写入 static.json 供复核。
+static_probe_keywords = ["zzzzz"]
+# passed 源缓存有效期（天），超过自动重测；0 = 永不过期（默认）。
+cache_ttl_days = 0
+```
 
 ## 输出文件
 
@@ -113,7 +130,9 @@ author = "铁马飞桥"
 |------|------|
 | `filtered.json` | **完整阅读链路验证通过**的可用书源，直接导入 Legado |
 | `explore_only.json` | 仅支持「发现」功能、不支持搜索的书源 |
-| `test_cache.db` | SQLite 缓存 + 运行时数据（eligible、report） |
+| `unverified.json` | 搜索有结果但提取不到书籍 URL、链路无法验证的书源（仅供参考，不入 filtered） |
+| `static.json` | 链路通过但搜索疑似写死（static 探测命中）的书源，供人工复核（仍在 filtered 中） |
+| `test_cache.db` | SQLite 缓存 + 运行时数据（eligible、report、evidence、历史记录） |
 
 ## 验证深度：搜索 vs 完整阅读链路
 
@@ -130,10 +149,13 @@ author = "铁马飞桥"
 | `bookinfo_fetch` / `toc_fetch` / `chapter_fetch` | 对应页面请求失败（瞬时，后续轮次会重试） |
 | `toc_parse` | 目录规则提取不到章节链接（规则已失效） |
 | `content_short` | 正文过短（<50 字符），疑似解析错误 |
+| `mismatch` | 详情页书名与搜索结果名不一致（规则串书，读取的是另一本书） |
 | `blocked` | HTTP 403/401，站点反爬 |
 | `not_found` | HTTP 404 |
 | `rate_limited` | HTTP 408/429 限流 |
 | `no_results` | 搜索无结果（可能站内无此书或规则失效） |
+
+每源的最近一次测试证据（搜索关键词、链路通过数、正文长度、命中书名、static 探测结果）以 JSON 存入 `test_cache.db` 的 `evidence` 列，并追加写入 `test_history` 表（历史状态序列，供稳定性/回归分析）。
 
 JS 规则里的 `java.ajax(url)` / `java.post(url)` 会通过 **node↔Rust 交互桥**真实发
 HTTP 请求（携带 source.header + Referer），响应体回传 JS 继续求值——正文需要二次请求
@@ -158,3 +180,5 @@ JS 规则支持 Legado 的多种惯用写法，均能正确构建请求：
 - **JS 执行**: Node.js polyfill（可选依赖）；`java.ajax` 经 stdin/stdout 桥回调 Rust 真实发 HTTP
 - **缓存**: rusqlite（SQLite，支持断点续测）
 - **阅读链路验证**: content_check 模块，真实走 搜索→详情→目录→正文 四跳
+- **per-domain 限速**: 尊重书源 `concurrentRate` 声明（同域串行限速），降低反爬误判
+- **Legado 语义差分测试**: `tests/dsl_diff.rs` 以官方规则语义为基准锁定提取行为

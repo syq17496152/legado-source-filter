@@ -1,39 +1,65 @@
+# 搜索测试关键词配置。
+# 每个 [[search]] 条目指定一本书，测试时会被优先用作该域名的搜索关键词。
+
 [[search]]
 name = "玄鉴仙族"
 author = "季越人"
+domain = "qidian.com"
 # 起点中文网 - 2026年5月畅销榜第1
 
 [[search]]
 name = "修真界第一营销咖"
 author = "云霄桂月"
+domain = "jjwxc.net"
 # 晋江文学城 - 2026年十大热门小说第1
 
 [[search]]
 name = "无敌天命"
 author = "青鸾峰上"
+domain = "zongheng.com"
 # 纵横中文网 - 2026年4月月票榜第1
 
 [[search]]
 name = "罪恶之城"
 author = "烟雨江南"
+domain = "17k.com"
 # 17k小说网 - 推荐榜第1（1099万推荐）
 
 [[search]]
 name = "我不是戏神"
 author = "三九音域"
+domain = "fanqienovel.com"
 # 番茄小说 - 2026年巅峰榜第1
 
 [[search]]
 name = "三国帝皇之万界征战"
 author = "无量功德"
+domain = "faloo.com"
 # 飞卢中文网 - 霸占天榜两年以上
 
 [[search]]
 name = "我真不是邪神走狗"
 author = "万劫火"
+domain = "ciweimao.com"
 # 刺猬猫 - 均订5.4万，全站原创首订记录
 
 [[search]]
 name = "大荒吞天诀"
 author = "铁马飞桥"
+domain = "qimao.com"
 # 七猫免费小说 - 310万在读，玄幻顶流
+
+# 通用回退关键词：在 checkKeyWord 和域名匹配书都不可用时使用。
+# 注意：这些是网文最高频词，几乎所有源都能搜出结果，区分度低；
+# 建议针对目标站点补充更具体的 [[search]] 条目（含 domain）。
+[test]
+generic_keywords = ["重生", "系统", "穿越"]
+
+# static 探测关键词：链路验证通过后，用这个"冷门"词再搜一次；
+# 若结果与主关键词几乎完全重合，说明该源搜索可能写死（永远返回同一页）。
+# 命中源仍保留 passed（链路确实可读），但会写入 static.json 供人工复核。
+static_probe_keywords = ["zzzzz"]
+
+# passed 源缓存有效期（天）：超过后自动重测（0 = 永不过期，信任缓存）。
+# failed 源始终重测，不受此影响。
+cache_ttl_days = 0

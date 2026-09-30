@@ -43,6 +43,22 @@ impl ChainResult {
     }
 }
 
+/// Whether a rule string is a literal URL / path (not a DSL rule): starts with
+/// a scheme or `/`, contains no `@` rule separators and no `{{` placeholders.
+/// Literal URLs are used as-is instead of being run through the DSL extractor
+/// (which would treat e.g. `/toc` as a selector and return garbage).
+fn is_literal_url(rule: &str) -> bool {
+    let r = rule.trim();
+    !r.is_empty()
+        && !r.contains('@')
+        && !r.contains('{')
+        && !r.contains(char::is_whitespace)
+        && (r.starts_with("http://")
+            || r.starts_with("https://")
+            || r.starts_with("//")
+            || r.starts_with('/'))
+}
+
 /// Whether a value is JS-based (needs the polyfill) vs a plain DSL rule.
 fn is_js_rule(v: &str) -> bool {
     let v = v.trim();
@@ -77,6 +93,34 @@ async fn fetch_body(
         "html".to_string()
     };
     Some((result.body_text, ct))
+}
+
+/// Like `eval_rule` but JOINS all extracted values instead of taking the
+/// first non-empty one. Needed for content rules that yield one string per
+/// element (`div#content p@text` → one paragraph per match); taking only the
+/// first would silently truncate the chapter.
+async fn eval_rule_concat(
+    client: &HttpClient,
+    content: &str,
+    content_type: &str,
+    rule: &str,
+    base_url: &str,
+    headers: &[(String, String)],
+) -> Option<String> {
+    if looks_like_js(rule) {
+        return eval_rule(client, content, content_type, rule, base_url, headers).await;
+    }
+    let vals = rule_dsl::extract_single(content, content_type, rule);
+    let joined: Vec<String> = vals
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.join("\n"))
+    }
 }
 
 /// Extract a rule value from content, or run JS on it when the rule is JS.
@@ -131,6 +175,7 @@ pub async fn verify_chain(
     source: &BookSource,
     book_url: &str,
     _base_url: &str,
+    expected_name: Option<&str>,
 ) -> ChainResult {
     let src_headers = source_headers(source);
 
@@ -138,6 +183,35 @@ pub async fn verify_chain(
     let Some((book_body, book_ct)) = fetch_body(client, book_url, &src_headers).await else {
         return ChainResult::fail("bookinfo_fetch", book_url);
     };
+
+    // ── 1.5 Consistency: the detail page's book name should match the book
+    // the search result claimed. If ruleBookInfo.name extracts a name that has
+    // nothing in common with the search result, the rules are pulling the
+    // wrong book ("张冠李戴") — a chain that "works" but reads the wrong book
+    // is worthless. The check is deliberately lenient (containment or ≥ 50%
+    // bigram overlap) to avoid flagging formatting differences.
+    if let Some(expected) = expected_name
+        && let Some(bi) = source.ruleBookInfo.as_ref()
+        && let Some(name_rule) = bi
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty() && *r != "-" && *r != "#")
+        && let Some(actual) =
+            eval_rule(client, &book_body, &book_ct, name_rule, book_url, &src_headers).await
+    {
+        let expected_n = normalize_book_name(expected);
+        let actual_n = normalize_book_name(&actual);
+        if expected_n.chars().count() >= 4
+            && actual_n.chars().count() >= 4
+            && !names_match(&expected_n, &actual_n)
+        {
+            return ChainResult::fail(
+                "mismatch",
+                format!("search='{}' vs detail='{}'", expected_n, actual_n),
+            );
+        }
+    }
 
     // ── 2. ruleBookInfo → tocUrl ──
     let toc_url = match source.ruleBookInfo.as_ref() {
@@ -153,6 +227,9 @@ pub async fn verify_chain(
                         // Template with book-info fields — substitute from the
                         // extracted book info, else keep as-is.
                         toc = substitute_book_fields(rule, source, &book_body, &book_ct);
+                    } else if is_literal_url(rule) {
+                        // Literal URL / path — use directly, never DSL-extract.
+                        toc = Some(rule.to_string());
                     } else {
                         toc = rule_dsl::extract_single(&book_body, &book_ct, rule)
                             .into_iter()
@@ -284,7 +361,7 @@ pub async fn verify_chain(
 
     loop {
         pages += 1;
-        let raw = eval_rule(
+        let raw = eval_rule_concat(
             client,
             &chapter_body,
             &chapter_ct,
@@ -332,6 +409,47 @@ pub async fn verify_chain(
         return ChainResult::fail("content_short", format!("{} chars", len));
     }
     ChainResult::pass(len, accumulated.chars().take(40).collect::<String>())
+}
+
+/// Normalize a book name for similarity comparison: keep only alphanumeric
+/// characters (CJK ideographs included), lowercase.
+pub fn normalize_book_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// Bigram (character-pair) Jaccard similarity in [0, 1].
+pub fn bigram_jaccard(a: &str, b: &str) -> f64 {
+    let bigrams = |s: &str| -> std::collections::HashSet<(char, char)> {
+        let chars: Vec<char> = s.chars().collect();
+        if chars.len() < 2 {
+            return std::collections::HashSet::new();
+        }
+        chars.windows(2).map(|w| (w[0], w[1])).collect()
+    };
+    let ba = bigrams(a);
+    let bb = bigrams(b);
+    if ba.is_empty() || bb.is_empty() {
+        return 0.0;
+    }
+    let inter = ba.intersection(&bb).count();
+    let union = ba.len() + bb.len() - inter;
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
+/// Whether two normalized book names plausibly refer to the same book:
+/// containment either way, or ≥ 50% character-bigram overlap.
+pub fn names_match(a: &str, b: &str) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a.contains(b) || b.contains(a) || bigram_jaccard(a, b) >= 0.5
 }
 
 /// Strip tags & whitespace for length heuristics, collapse the whole thing.
@@ -665,7 +783,7 @@ mod tests {
         let client = HttpClient::new(10).unwrap();
         // Verify chain from the TOC page: chain uses ruleBookInfo.tocUrl default
         // to book_url, so pass the TOC URL as book_url.
-        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        let res = verify_chain(&client, &source, &toc_url, &base, None).await;
         assert!(res.ok, "expected pass, got {:?}", res);
         assert!(
             res.content_len >= 3 * 200,
@@ -682,7 +800,7 @@ mod tests {
         let base = format!("http://{}", addr);
         let (source, toc_url) = paginated_source(&base, Some("div#next@href"));
         let client = HttpClient::new(10).unwrap();
-        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        let res = verify_chain(&client, &source, &toc_url, &base, None).await;
         assert!(res.ok, "single-page chapter should pass, got {:?}", res);
         assert!(res.content_len >= 200, "got {}", res.content_len);
     }
@@ -694,7 +812,7 @@ mod tests {
         let base = format!("http://{}", addr);
         let (source, toc_url) = paginated_source(&base, None);
         let client = HttpClient::new(10).unwrap();
-        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        let res = verify_chain(&client, &source, &toc_url, &base, None).await;
         assert!(res.ok, "no nextContentUrl should not fail, got {:?}", res);
     }
 
@@ -742,13 +860,152 @@ mod tests {
         let base = format!("http://{}", addr);
         let (source, toc_url) = paginated_source(&base, Some("div#next@href"));
         let client = HttpClient::new(10).unwrap();
-        let res = verify_chain(&client, &source, &toc_url, &base).await;
+        let res = verify_chain(&client, &source, &toc_url, &base, None).await;
         // 2 chars of "正文" is below threshold, but crucially it must terminate.
         assert!(
             !res.ok,
             "self-referencing next should be content_short, got {:?}",
             res
         );
+    }
+
+    // ── 张冠李戴 consistency check ──
+
+    #[test]
+    fn test_normalize_book_name() {
+        assert_eq!(normalize_book_name("《测试 书名》"), "测试书名");
+        assert_eq!(normalize_book_name("测试-书名！"), "测试书名");
+        assert_eq!(normalize_book_name("  "), "");
+        assert_eq!(normalize_book_name("Test Book 2"), "testbook2");
+    }
+
+    #[test]
+    fn test_names_match() {
+        assert!(names_match("测试书名", "测试书名"));
+        assert!(names_match("测试书名", "测试书名第二部"), "containment");
+        assert!(names_match("测试书名", "新测试书名"), "containment other way");
+        assert!(names_match("测试书名", "测试书名的名字"), "bigram overlap");
+        assert!(
+            !names_match("测试书名", "完全不同的书名"),
+            "disjoint names must not match"
+        );
+        assert!(!names_match("", "测试书名"));
+        assert!(!names_match("测试书名", ""));
+    }
+
+    #[test]
+    fn test_bigram_jaccard_bounds() {
+        assert_eq!(bigram_jaccard("aaaa", "aaaa"), 1.0);
+        assert_eq!(bigram_jaccard("aaaa", "bbbb"), 0.0);
+        assert_eq!(bigram_jaccard("a", "b"), 0.0, "too short → no bigrams");
+    }
+
+    /// A mock site whose detail page title either matches or contradicts the
+    /// search-result name.
+    async fn mock_mismatch_server(match_title: bool) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let title: &'static str = if match_title {
+            "测试书名"
+        } else {
+            "完全不同的书名"
+        };
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 8192];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("/")
+                        .split('?')
+                        .next()
+                        .unwrap_or("/");
+                    let body = match path {
+                        // tocUrl defaults to book_url itself, so the detail
+                        // page must also carry the chapter list — and the
+                        // anchor must come FIRST (the bare `a` chapterList
+                        // rule relies on the first element being the link).
+                        "/book" => format!(
+                            "<html><a href='/c/1'>第一章</a><h1 class='title'>{title}</h1></html>"
+                        ),
+                        "/toc" => "<html><a href='/c/1'>第一章</a></html>".to_string(),
+                        "/c/1" => "<html><p>这是一段足够长的正文内容用来通过长度检查，需要超过五十个字符才能被判定为有效正文内容，所以我们再多写一些汉字凑足长度。</p></html>"
+                            .to_string(),
+                        _ => "nf".to_string(),
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        addr
+    }
+
+    fn mismatch_source(base: &str) -> BookSource {
+        BookSource {
+            bookSourceName: "mismatch".into(),
+            bookSourceUrl: base.to_string(),
+            ruleBookInfo: Some(BookInfoRule {
+                name: Some("h1.title@text".into()),
+                ..Default::default()
+            }),
+            ruleToc: Some(TocRule {
+                chapterList: Some("a".into()),
+                chapterUrl: Some("@href".into()),
+                chapterName: Some("@text".into()),
+                ..Default::default()
+            }),
+            ruleContent: Some(ContentRule {
+                content: Some("p@text".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chain_mismatch_detected() {
+        let addr = mock_mismatch_server(false).await;
+        let base = format!("http://{}", addr);
+        let source = mismatch_source(&base);
+        let client = HttpClient::new(10).unwrap();
+        let res = verify_chain(&client, &source, &format!("{base}/book"), &base, Some("测试书名"))
+            .await;
+        assert!(!res.ok, "expected mismatch, got {:?}", res);
+        assert_eq!(res.stage, "mismatch");
+    }
+
+    #[tokio::test]
+    async fn test_chain_matching_name_passes() {
+        let addr = mock_mismatch_server(true).await;
+        let base = format!("http://{}", addr);
+        let source = mismatch_source(&base);
+        let client = HttpClient::new(10).unwrap();
+        let res = verify_chain(&client, &source, &format!("{base}/book"), &base, Some("测试书名"))
+            .await;
+        assert!(res.ok, "matching name should pass, got {:?}", res);
+    }
+
+    #[tokio::test]
+    async fn test_chain_no_expected_name_skips_check() {
+        // No search-result name → the consistency check is skipped entirely.
+        let addr = mock_mismatch_server(false).await;
+        let base = format!("http://{}", addr);
+        let source = mismatch_source(&base);
+        let client = HttpClient::new(10).unwrap();
+        let res = verify_chain(&client, &source, &format!("{base}/book"), &base, None).await;
+        assert!(res.ok, "no expected name → no mismatch, got {:?}", res);
     }
 }
 
@@ -996,7 +1253,8 @@ fn apply_field_extract(item: &str, content_type: &str, rule: Option<&str>) -> Op
         return None;
     }
     let tokens = crate::rule_dsl::parser::tokenize(rule);
-    let vals = if content_type.contains("json") {
+    // extract() handles segment fallback and ## replacements.
+    let out = if content_type.contains("json") {
         if let Ok(json) = serde_json::from_str(item) {
             crate::rule_dsl::json_extractor::extract(&json, &tokens)
         } else {
@@ -1005,7 +1263,6 @@ fn apply_field_extract(item: &str, content_type: &str, rule: Option<&str>) -> Op
     } else {
         crate::rule_dsl::html_extractor::extract(item, &tokens)
     };
-    let out = crate::rule_dsl::combinator::apply_combinators(vals, &tokens);
     if let Some(first) = out.first().cloned()
         && !first.is_empty()
     {
@@ -1163,5 +1420,47 @@ mod js_search_tests {
         let rows = extract_results_js(&client, &source, &res, "https://mock.example").await;
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][0], "书名一");
+    }
+
+    #[test]
+    fn test_substitute_toc_url_template() {
+        // A URL template with `{{$.field}}` placeholders must expand against a
+        // JSON detail page, and must return None for a non-JSON page (so the
+        // chain falls back to book_url instead of garbage).
+        let rule = "https://anduril.xmkanshu.com/v3/book/get_last_chapter_list?bookid={{$.result.book_id}}&page=1";
+        let source = BookSource {
+            bookSourceName: "熊猫看书".into(),
+            bookSourceUrl: "https://anduril.xmkanshu.com".into(),
+            ruleBookInfo: Some(BookInfoRule {
+                name: Some("$.result.book_name".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // JSON detail page → placeholders resolve.
+        let jbody = r#"{"result":{"book_id":"123","book_name":"测试"}}"#;
+        assert_eq!(
+            substitute_book_fields(rule, &source, jbody, "json").as_deref(),
+            Some("https://anduril.xmkanshu.com/v3/book/get_last_chapter_list?bookid=123&page=1")
+        );
+        // HTML detail page (e.g. a 404 error page) → unresolvable → None.
+        let hbody = "<html><head><title>404 Not Found</title></head><body>404</body></html>";
+        assert_eq!(
+            substitute_book_fields(rule, &source, hbody, "html"),
+            None,
+            "non-JSON page must not yield a garbage URL"
+        );
+    }
+
+    #[test]
+    fn test_is_literal_url() {
+        assert!(is_literal_url("https://example.com/toc"));
+        assert!(is_literal_url("http://example.com/x"));
+        assert!(is_literal_url("/toc"));
+        assert!(is_literal_url("//cdn.example.com/toc"));
+        assert!(!is_literal_url("class.a@href"));
+        assert!(!is_literal_url("/toc?x={{$.id}}"));
+        assert!(!is_literal_url(""));
+        assert!(!is_literal_url("has space"));
     }
 }

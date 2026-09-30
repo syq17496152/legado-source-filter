@@ -11,6 +11,7 @@ pub mod preflight;
 pub mod reporter;
 pub mod rule_dsl;
 pub mod search_url;
+pub mod status;
 pub mod tester;
 pub mod types;
 pub mod url_fixer;

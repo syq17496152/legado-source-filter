@@ -30,13 +30,10 @@ pub fn apply_combinators(values: Vec<String>, tokens: &[RuleToken]) -> Vec<Strin
                         .collect();
                 }
             }
-            RuleToken::Index(n)
-                // !0 means "exclude index 0", .0 means "only index 0"
-                // We handle Index as "take index n" in the HTML extractor.
-                // Here we handle it as "remove index n" for exclusion patterns.
-                if *n < results.len() => {
-                    results.remove(*n);
-                }
+            // Index / ExcludeIndex are fully consumed by the HTML/JSON
+            // extractors (`.n` takes, `!n` excludes). Applying them again here
+            // would double-apply and delete already-extracted values, so they
+            // are intentionally ignored.
             _ => {}
         }
     }
@@ -94,13 +91,13 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_combinators_index_removal() {
-        // !0 means "exclude index 0" — remove first element
-        use crate::rule_dsl::parser::RuleToken;
+    fn test_apply_combinators_ignores_index_tokens() {
+        // Index/ExcludeIndex are consumed by the extractors; the combinator
+        // must NOT re-apply them (that used to delete extracted values).
         let tokens = vec![RuleToken::Index(0)];
-        let values = vec!["remove".to_string(), "keep".to_string()];
+        let values = vec!["first".to_string(), "second".to_string()];
         let result = apply_combinators(values, &tokens);
-        assert_eq!(result, vec!["keep"]);
+        assert_eq!(result, vec!["first", "second"]);
     }
 
     #[test]

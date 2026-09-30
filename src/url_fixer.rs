@@ -45,6 +45,31 @@ pub fn fix_url(raw: &str) -> Option<String> {
     None
 }
 
+/// Normalize a URL's host to a canonical domain key for cross-source
+/// aggregation: lowercase, strip a leading `www.` and any trailing dot,
+/// drop the port. `None` when the URL has no usable host.
+///
+/// Used by dead-domain detection so `m.example.com`, `www.example.com` and
+/// `example.com:8080` all count as the same site.
+pub fn normalized_domain(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    let parsed = url::Url::parse(trimmed)
+        .or_else(|_| url::Url::parse(&format!("https://{trimmed}")))
+        .ok()?;
+    let host = parsed.host_str()?.trim_end_matches('.').to_lowercase();
+    Some(host.strip_prefix("www.").unwrap_or(&host).to_string())
+}
+
+/// Whether a normalized domain belongs to a site hint like `qidian.com`
+/// (`m.qidian.com` and `www.qidian.com` both match; `notqidian.com` does not).
+pub fn domain_matches(domain: &str, hint: &str) -> bool {
+    let hint = hint.trim().trim_end_matches('.').to_lowercase();
+    if hint.is_empty() {
+        return false;
+    }
+    domain == hint || domain.ends_with(&format!(".{}", hint))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +132,33 @@ mod tests {
         assert_eq!(fix_url("DQuestQBall"), None);
         assert_eq!(fix_url(""), None);
         assert_eq!(fix_url("一个书源"), None);
+    }
+
+    #[test]
+    fn test_normalized_domain() {
+        assert_eq!(
+            normalized_domain("https://www.example.com"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            normalized_domain("https://m.example.com/path?q=1"),
+            Some("m.example.com".into())
+        );
+        assert_eq!(
+            normalized_domain("HTTP://EXAMPLE.COM.:8080/"),
+            Some("example.com".into())
+        );
+        assert_eq!(normalized_domain("example.com"), Some("example.com".into()));
+        assert_eq!(normalized_domain("not a url"), None);
+        assert_eq!(normalized_domain(""), None);
+    }
+
+    #[test]
+    fn test_domain_matches() {
+        assert!(domain_matches("qidian.com", "qidian.com"));
+        assert!(domain_matches("m.qidian.com", "qidian.com"));
+        assert!(domain_matches("www.qidian.com", "qidian.com"));
+        assert!(!domain_matches("notqidian.com", "qidian.com"));
+        assert!(!domain_matches("qidian.com", ""));
     }
 }

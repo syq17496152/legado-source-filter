@@ -111,6 +111,7 @@ fn main() -> anyhow::Result<()> {
             timeout,
             force,
             limit,
+            sample,
             config: config_path,
             rounds,
             verify_content,
@@ -176,6 +177,9 @@ fn main() -> anyhow::Result<()> {
             let eligible = if let Some(n) = limit {
                 let n = (*n).min(preflight_out.eligible.len());
                 preflight_out.eligible.into_iter().take(n).collect()
+            } else if let Some(n) = sample {
+                let n = (*n).min(preflight_out.eligible.len());
+                legado_source_filter::pipeline::sample_n(&preflight_out.eligible, n)
             } else {
                 preflight_out.eligible
             };

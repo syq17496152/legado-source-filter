@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 
 /// Preserve any fields not explicitly modeled in a struct, so a round-trip
 /// (parse → serialize) never drops Legado rules we don't know about yet.
@@ -218,6 +219,59 @@ pub struct ExploreRule {
 
 // ── Skip/Reason enums ────────────────────────────────────────
 
+/// Parse a source's `concurrentRate` into a minimum inter-request interval.
+///
+/// Legado allows either a plain millisecond number (`"1000"`) or a JSON
+/// object (`{"rate": N, "interval": N, "timeUnit": "ms"}` / `"s"`).
+/// Returns `None` when absent or unparseable (no rate limiting).
+pub fn parse_concurrent_rate(v: Option<&Value>) -> Option<Duration> {
+    let v = v?;
+    match v {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return None;
+            }
+            // Plain milliseconds ("1000").
+            if let Ok(ms) = s.parse::<u64>() {
+                return Some(Duration::from_millis(ms));
+            }
+            // JSON object serialized as a string.
+            if let Ok(obj) = serde_json::from_str::<Value>(s) {
+                return parse_concurrent_rate(Some(&obj));
+            }
+            None
+        }
+        Value::Object(obj) => {
+            // Semantics: every `interval` × `timeUnit`, at most `rate` requests
+            // are allowed → per-request pause = interval × unit / rate.
+            let interval_units = obj
+                .get("interval")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1)
+                .max(1);
+            let rate = obj
+                .get("rate")
+                .and_then(|v| v.as_u64())
+                .filter(|r| *r > 0)
+                .unwrap_or(1);
+            let time_unit = obj
+                .get("timeUnit")
+                .and_then(|v| v.as_str())
+                .unwrap_or("ms")
+                .to_lowercase();
+            let unit_ms = match time_unit.as_str() {
+                "s" | "second" | "seconds" => 1000u64,
+                "m" | "minute" | "minutes" => 60_000u64,
+                _ => 1u64, // ms / anything unknown
+            };
+            let interval_ms = interval_units.saturating_mul(unit_ms).checked_div(rate);
+            interval_ms.map(|ms| Duration::from_millis(ms.max(1)))
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(non_snake_case)]
 #[serde(rename_all = "snake_case")]
@@ -257,6 +311,9 @@ pub struct PreflightBreakdown {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::time::Duration;
+
     /// Round-trip must preserve unknown top-level and nested-rule fields,
     /// otherwise filtered.json would silently drop Legado rules.
     #[test]
@@ -287,5 +344,44 @@ mod tests {
             serde_json::json!("@js:var a=1")
         );
         assert_eq!(back["ruleToc"]["isVolume"], serde_json::json!("true"));
+    }
+
+    #[test]
+    fn test_parse_concurrent_rate() {
+        use serde_json::json;
+
+        // Plain millisecond strings (the format in the real dataset).
+        assert_eq!(
+            parse_concurrent_rate(Some(&json!("1000"))),
+            Some(Duration::from_millis(1000))
+        );
+        assert_eq!(
+            parse_concurrent_rate(Some(&json!("3000"))),
+            Some(Duration::from_millis(3000))
+        );
+        // JSON object forms.
+        assert_eq!(
+            parse_concurrent_rate(Some(&json!({"interval": 500}))),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_concurrent_rate(Some(&json!({"rate": 2, "timeUnit": "s"}))),
+            Some(Duration::from_millis(500)),
+            "2 requests per second → 500ms apart"
+        );
+        assert_eq!(
+            parse_concurrent_rate(Some(&json!({"rate": 1, "interval": 3, "timeUnit": "s"}))),
+            Some(Duration::from_millis(3000)),
+            "1 request per 3 seconds"
+        );
+        // Object serialized as string.
+        assert_eq!(
+            parse_concurrent_rate(Some(&json!(r#"{"interval": 700}"#))),
+            Some(Duration::from_millis(700))
+        );
+        // Absent / unparseable.
+        assert_eq!(parse_concurrent_rate(None), None);
+        assert_eq!(parse_concurrent_rate(Some(&json!("abc"))), None);
+        assert_eq!(parse_concurrent_rate(Some(&json!(42))), None);
     }
 }

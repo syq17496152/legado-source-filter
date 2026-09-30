@@ -3,7 +3,22 @@ use serde_json::Value;
 use super::parser::RuleToken;
 
 /// Extract values from a JSON Value using rule tokens.
+///
+/// `||` fallback segments are evaluated independently and the first segment
+/// with a non-empty result wins (Legado semantics).
 pub fn extract(json: &Value, tokens: &[RuleToken]) -> Vec<String> {
+    for segment in super::parser::split_segments(tokens) {
+        let mut results = extract_segment(json, segment);
+        results = super::combinator::apply_combinators(results, segment);
+        if !results.is_empty() && !results.iter().all(|s| s.trim().is_empty()) {
+            return results;
+        }
+    }
+    Vec::new()
+}
+
+/// Evaluate one `||`-segment (no Fallback tokens inside).
+fn extract_segment(json: &Value, tokens: &[RuleToken]) -> Vec<String> {
     let mut results = Vec::new();
 
     if tokens.is_empty() {
